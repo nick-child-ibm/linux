@@ -118,7 +118,7 @@ struct ibmveth_buff_pool {
     /*
     * if [x] = 5 then skbbuff[5] and dba_addr[5] = NULL
     * if [x] = IBM_VETH_INVALID_MAP then we have allocated this area
-    * 
+    */
     dma_addr_t *dma_addr; //array of length = size
     struct sk_buff **skbuff; //array of length = size
     int active; // pool_active[index]
