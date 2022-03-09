@@ -107,17 +107,21 @@ static int pool_active[] = { 1, 1, 0, 0, 1};
 #define IBM_VETH_INVALID_MAP ((u16)0xffff)
 
 struct ibmveth_buff_pool {
-    u32 size;
-    u32 index;
-    u32 buff_size;
-    u32 threshold;
-    atomic_t available;
-    u32 consumer_index;
-    u32 producer_index;
-    u16 *free_map;
-    dma_addr_t *dma_addr;
-    struct sk_buff **skbuff;
-    int active;
+    u32 size; // pool_count[index]
+    u32 index; // index in regards to arrays above 0-4
+    u32 buff_size; // pool_size[index]
+    u32 threshold; // size  * 7 / 8
+    atomic_t available; // init'd to 0, # of alloc'd skb's ready to be filled by hardware
+    u32 consumer_index; // the next index to free_map that we can use for mapping to allocated skb ( set to IBMVETH_INVALUD)
+    u32 producer_index; // next index to free_map that we remove unmap buffer from (set to a skbbuff index)
+    u16 *free_map; // array of length = size, inited to values [0] = 0, [1] = 1 etc ..., 
+    /*
+    * if [x] = 5 then skbbuff[5] and dba_addr[5] = NULL
+    * if [x] = IBM_VETH_INVALID_MAP then we have allocated this area
+    * 
+    dma_addr_t *dma_addr; //array of length = size
+    struct sk_buff **skbuff; //array of length = size
+    int active; // pool_active[index]
     struct kobject kobj;
 };
 
@@ -182,10 +186,10 @@ struct ibmveth_buf_desc_fields {
 	u32 address;
 	u32 flags_len;
 #endif
-#define IBMVETH_BUF_VALID	0x80000000
-#define IBMVETH_BUF_TOGGLE	0x40000000
-#define IBMVETH_BUF_LRG_SND     0x04000000
-#define IBMVETH_BUF_NO_CSUM	0x02000000
+#define IBMVETH_BUF_VALID	    0x80000000
+#define IBMVETH_BUF_TOGGLE	  0x40000000
+#define IBMVETH_BUF_LRG_SND   0x04000000
+#define IBMVETH_BUF_NO_CSUM	  0x02000000
 #define IBMVETH_BUF_CSUM_GOOD	0x01000000
 #define IBMVETH_BUF_LEN_MASK	0x00FFFFFF
 };
