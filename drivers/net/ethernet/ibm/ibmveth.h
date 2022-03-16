@@ -90,19 +90,25 @@ static inline long h_illan_attributes(unsigned long unit_address,
 #define h_change_logical_lan_mac(ua, mac) \
   plpar_hcall_norets(H_CHANGE_LOGICAL_LAN_MAC, ua, mac)
 
-#define IBMVETH_NUM_BUFF_POOLS 5
+#define IBMVETH_NUM_BUFF_POOLS 3
 #define IBMVETH_IO_ENTITLEMENT_DEFAULT 4243456 /* MTU of 1500 needs 4.2Mb */
 #define IBMVETH_BUFF_OH 22 /* Overhead: 14 ethernet header + 8 opaque handle */
 #define IBMVETH_MIN_MTU 68
 #define IBMVETH_MAX_POOL_COUNT 4096
 #define IBMVETH_BUFF_LIST_SIZE 4096
 #define IBMVETH_FILT_LIST_SIZE 4096
-#define IBMVETH_MAX_BUF_SIZE (1024 * 128)
+#define IBMVETH_BUFFER_SIZE (16 * 1024 * 1024)
+#define IBMVETH_MAX_RXQ_SIZE 4096
+#define IBMVETH_NUM_TX_BUFS 16
 
-static int pool_size[] = { 512, 1024 * 2, 1024 * 16, 1024 * 32, 1024 * 64 };
-static int pool_count[] = { 256, 512, 256, 256, 256 };
-static int pool_count_cmo[] = { 256, 512, 256, 256, 64 };
-static int pool_active[] = { 1, 1, 0, 0, 1};
+#define IBMVETH_NUM_64K_RX_BUFS 256
+#define IBMVETH_NUM_2K_RX_BUFS 512
+#define IBMVETH_NUM_512_RX_BUFS 512
+
+static int pool_size[] = { 512, 1024 * 2, 1024 * 64 };
+static int pool_count[] = { IBMVETH_NUM_512_RX_BUFS, IBMVETH_NUM_2K_RX_BUFS, IBMVETH_NUM_64K_RX_BUFS };
+static int pool_count_cmo[] = { 256, 512, 64 };
+static int pool_active[] = { 1, 1, 1};
 
 #define IBM_VETH_INVALID_MAP ((u16)0xffff)
 
@@ -118,6 +124,7 @@ struct ibmveth_buff_pool {
     dma_addr_t *dma_addr;
     struct sk_buff **skbuff;
     int active;
+    u8 *mapped_buf;
     struct kobject kobj;
 };
 
@@ -130,16 +137,61 @@ struct ibmveth_rx_q {
     struct ibmveth_rx_q_entry *queue_addr;
 };
 
+struct ibmveth_tx_dma_buf {
+        u8 data[64*1024];
+};
+
+struct ibmveth_rx_64k_dma_buf {
+        u8 data[64*1024];
+};
+
+struct ibmveth_rx_2k_dma_buf {
+        u8 data[2*1024];
+};
+
+struct ibmveth_rx_512_dma_buf {
+        u8 data[512];
+};
+
+struct ibmveth_rx_q_entry {
+	__be32 flags_off;
+#define IBMVETH_RXQ_TOGGLE		0x80000000
+#define IBMVETH_RXQ_TOGGLE_SHIFT	31
+#define IBMVETH_RXQ_VALID		0x40000000
+#define IBMVETH_RXQ_LRG_PKT		0x04000000
+#define IBMVETH_RXQ_NO_CSUM		0x02000000
+#define IBMVETH_RXQ_CSUM_GOOD		0x01000000
+#define IBMVETH_RXQ_OFF_MASK		0x0000FFFF
+
+	__be32 length;
+	/* correlator is only used by the OS, no need to byte swap */
+	u64 correlator;
+};
+
+struct ibmveth_buffer {
+        struct ibmveth_tx_dma_buf tx_buf[IBMVETH_NUM_TX_BUFS];
+        struct ibmveth_rx_2k_dma_buf rx_2k_buf[IBMVETH_NUM_2K_RX_BUFS];
+        struct ibmveth_rx_512_dma_buf rx_512_buf[IBMVETH_NUM_512_RX_BUFS];
+        struct ibmveth_rx_q_entry rxq[IBMVETH_MAX_RXQ_SIZE];
+        u8 buffer_list[4096];
+        u8 filter_list[4096];
+        dma_addr_t tx_dma[IBMVETH_NUM_TX_BUFS];
+        dma_addr_t rx_64k_dma[IBMVETH_NUM_64K_RX_BUFS];
+        dma_addr_t rx_2k_dma[IBMVETH_NUM_2K_RX_BUFS];
+        dma_addr_t rx_512_dma[IBMVETH_NUM_512_RX_BUFS];
+        struct ibmveth_buff_pool rx_buff_pool[IBMVETH_NUM_BUFF_POOLS];
+        struct ibmveth_rx_64k_dma_buf *rx_64k_buf;
+} __packed;
+
 struct ibmveth_adapter {
     struct vio_dev *vdev;
     struct net_device *netdev;
     struct napi_struct napi;
     unsigned int mcastFilterSize;
-    void * buffer_list_addr;
-    void * filter_list_addr;
+    struct ibmveth_buffer * buffer_addr;
+    dma_addr_t buffer_dma;
     dma_addr_t buffer_list_dma;
     dma_addr_t filter_list_dma;
-    struct ibmveth_buff_pool rx_buff_pool[IBMVETH_NUM_BUFF_POOLS];
     struct ibmveth_rx_q rx_queue;
     int pool_config;
     int rx_csum;
@@ -193,21 +245,6 @@ struct ibmveth_buf_desc_fields {
 union ibmveth_buf_desc {
     u64 desc;
     struct ibmveth_buf_desc_fields fields;
-};
-
-struct ibmveth_rx_q_entry {
-	__be32 flags_off;
-#define IBMVETH_RXQ_TOGGLE		0x80000000
-#define IBMVETH_RXQ_TOGGLE_SHIFT	31
-#define IBMVETH_RXQ_VALID		0x40000000
-#define IBMVETH_RXQ_LRG_PKT		0x04000000
-#define IBMVETH_RXQ_NO_CSUM		0x02000000
-#define IBMVETH_RXQ_CSUM_GOOD		0x01000000
-#define IBMVETH_RXQ_OFF_MASK		0x0000FFFF
-
-	__be32 length;
-	/* correlator is only used by the OS, no need to byte swap */
-	u64 correlator;
 };
 
 #endif /* _IBMVETH_H */
