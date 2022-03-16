@@ -148,6 +148,7 @@ static void ibmveth_init_buffer_pool(struct ibmveth_buff_pool *pool,
 	pool->buff_size = buff_size;
 	pool->threshold = pool_size * 7 / 8;
 	pool->active = pool_active;
+	spin_lock_init(&pool->lock);
 }
 
 /* allocate and setup an buffer pool - called during open */
@@ -186,6 +187,37 @@ static inline void ibmveth_flush_buffer(void *addr, unsigned long length)
 		asm("dcbfl %0,%1" :: "b" (addr), "r" (offset));
 }
 
+static void ibmveth_remove_buffer_from_pool(struct ibmveth_adapter *adapter, u64 correlator);
+			    
+static void ibmveth_reuse_skb(struct sk_buff *skb)
+{
+	u8 *buf = skb->head;
+	struct net_device *netdev = skb->dev;
+	struct ibmveth_adapter *adapter = netdev_priv(netdev);
+	struct ibmveth_buffer *ba = adapter->buffer_addr;
+	struct ibmveth_buff_pool *pool;
+	int index;
+	u64 correlator;
+
+	skb->head = NULL;
+	if (buf >= &ba->rx_2k_buf[0].data[0] && buf <= &ba->rx_2k_buf[IBMVETH_NUM_2K_RX_BUFS-1].data[0]) {
+		index = (((unsigned long)buf) - (unsigned long)&ba->rx_2k_buf[0]) / sizeof(struct ibmveth_rx_2k_dma_buf);
+		pool = &ba->rx_buff_pool[1];
+	} else if (buf >= &ba->rx_512_buf[0].data[0] && buf <= &ba->rx_512_buf[IBMVETH_NUM_512_RX_BUFS-1].data[0]) {
+		index = (((unsigned long)buf) - (unsigned long)&ba->rx_512_buf[0]) / sizeof(struct ibmveth_rx_512_dma_buf);
+		pool = &ba->rx_buff_pool[0];
+	} else if (buf >= &ba->rx_64k_buf[0].data[0] && buf <= &ba->rx_64k_buf[IBMVETH_NUM_64K_RX_BUFS-1].data[0]) {
+		index = (((unsigned long)buf) - (unsigned long)ba->rx_64k_buf) / sizeof(struct ibmveth_rx_64k_dma_buf);
+		pool = &ba->rx_buff_pool[2];
+	} else {
+		netdev_err(netdev, "Unrecognized skb %p\n", skb);
+		return;
+	}
+
+	correlator = ((u64)pool->index << 32) | index;
+	ibmveth_remove_buffer_from_pool(adapter, correlator);
+}
+
 /* replenish the buffers for a pool.  note that we don't need to
  * skb_reserve these since they are used for incoming...
  */
@@ -198,15 +230,21 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 	struct sk_buff *skb;
 	unsigned int free_index, index;
 	u64 correlator;
-	unsigned long lpar_rc;
+	unsigned long lpar_rc, flags;
 	u8 *buf;
 
 	mb();
 
+	spin_lock_irqsave(&pool->lock, flags);
 	for (i = 0; i < count; ++i) {
 		union ibmveth_buf_desc desc;
 
-		skb = netdev_alloc_skb(adapter->netdev, pool->buff_size);
+		free_index = pool->consumer_index;
+		index = pool->free_map[free_index];
+		buf = pool->mapped_buf + (IBMVETH_BUF_SZ(pool->buff_size) * index);
+
+		memset(buf, 0, IBMVETH_BUF_SZ(pool->buff_size));
+		skb = build_skb(buf, IBMVETH_BUF_SZ(pool->buff_size));
 
 		if (!skb) {
 			netdev_dbg(adapter->netdev,
@@ -215,11 +253,11 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 			break;
 		}
 
-		free_index = pool->consumer_index;
+		skb_reserve(skb, NET_SKB_PAD);
+		skb->destructor = ibmveth_reuse_skb;
 		pool->consumer_index++;
 		if (pool->consumer_index >= pool->size)
 			pool->consumer_index = 0;
-		index = pool->free_map[free_index];
 
 		BUG_ON(index == IBM_VETH_INVALID_MAP);
 		BUG_ON(pool->skbuff[index] != NULL);
@@ -228,13 +266,10 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 		pool->skbuff[index] = skb;
 
 		correlator = ((u64)pool->index << 32) | index;
-		buf = pool->mapped_buf + (pool->buff_size * index);
-
 		*(u64 *)skb->data = correlator;
-		*(u64 *)buf = correlator;
 
 		desc.fields.flags_len = IBMVETH_BUF_VALID | pool->buff_size;
-		desc.fields.address = pool->dma_addr[index];
+		desc.fields.address = pool->dma_addr[index] + NET_SKB_PAD;
 
 		if (rx_flush) {
 			unsigned int len = min(pool->buff_size,
@@ -255,6 +290,7 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 
 	mb();
 	atomic_add(buffers_added, &(pool->available));
+	spin_unlock_irqrestore(&pool->lock, flags);
 	return;
 
 failure:
@@ -269,6 +305,7 @@ failure:
 
 	mb();
 	atomic_add(buffers_added, &(pool->available));
+	spin_unlock_irqrestore(&pool->lock, flags);
 }
 
 /*
@@ -335,10 +372,12 @@ static void ibmveth_remove_buffer_from_pool(struct ibmveth_adapter *adapter,
 	unsigned int free_index;
 	struct sk_buff *skb;
 	struct ibmveth_buffer *buf = adapter->buffer_addr;
+	unsigned long flags;
 	
 	BUG_ON(pool >= IBMVETH_NUM_BUFF_POOLS);
 	BUG_ON(index >= buf->rx_buff_pool[pool].size);
 
+	spin_lock_irqsave(&buf->rx_buff_pool[pool].lock, flags);
 	skb = buf->rx_buff_pool[pool].skbuff[index];
 	BUG_ON(skb == NULL);
 
@@ -354,6 +393,7 @@ static void ibmveth_remove_buffer_from_pool(struct ibmveth_adapter *adapter,
 	mb();
 
 	atomic_dec(&(buf->rx_buff_pool[pool].available));
+	spin_unlock_irqrestore(&buf->rx_buff_pool[pool].lock, flags);
 }
 
 /* get the current buffer on the rx queue */
@@ -367,23 +407,6 @@ static inline struct sk_buff *ibmveth_rxq_get_buffer(struct ibmveth_adapter *ada
 	BUG_ON(index >= adapter->buffer_addr->rx_buff_pool[pool].size);
 
 	return adapter->buffer_addr->rx_buff_pool[pool].skbuff[index];
-}
-
-static inline u8 *ibmveth_rxq_get_data(struct ibmveth_adapter *adapter)
-{
-	u64 correlator = adapter->rx_queue.queue_addr[adapter->rx_queue.index].correlator;
-	unsigned int pool = correlator >> 32;
-	unsigned int index = correlator & 0xffffffffUL;
-	unsigned int buf_sz;
-	u8 *ret;
-
-	BUG_ON(pool >= IBMVETH_NUM_BUFF_POOLS);
-	BUG_ON(index >= adapter->buffer_addr->rx_buff_pool[pool].size);
-
-	buf_sz = adapter->buffer_addr->rx_buff_pool[pool].buff_size;
-	ret = adapter->buffer_addr->rx_buff_pool[pool].mapped_buf;
-	ret += (buf_sz*index);
-	return ret;
 }
 
 /* recycle the current buffer on the rx queue */
@@ -403,13 +426,14 @@ static int ibmveth_rxq_recycle_buffer(struct ibmveth_adapter *adapter)
 
 	if (!buf->rx_buff_pool[pool].active) {
 		ibmveth_rxq_harvest_buffer(adapter);
+		ibmveth_remove_buffer_from_pool(adapter, adapter->rx_queue.queue_addr[adapter->rx_queue.index].correlator);
 		ibmveth_free_buffer_pool(adapter, &buf->rx_buff_pool[pool]);
 		goto out;
 	}
 
 	desc.fields.flags_len = IBMVETH_BUF_VALID |
 		buf->rx_buff_pool[pool].buff_size;
-	desc.fields.address = buf->rx_buff_pool[pool].dma_addr[index];
+	desc.fields.address = buf->rx_buff_pool[pool].dma_addr[index] + NET_SKB_PAD;
 
 	lpar_rc = h_add_logical_lan_buffer(adapter->vdev->unit_address, desc.desc);
 
@@ -431,8 +455,9 @@ out:
 
 static void ibmveth_rxq_harvest_buffer(struct ibmveth_adapter *adapter)
 {
+	/*
 	ibmveth_remove_buffer_from_pool(adapter, adapter->rx_queue.queue_addr[adapter->rx_queue.index].correlator);
-
+*/
 	if (++adapter->rx_queue.index == adapter->rx_queue.num_slots) {
 		adapter->rx_queue.index = 0;
 		adapter->rx_queue.toggle = !adapter->rx_queue.toggle;
@@ -1175,7 +1200,6 @@ static int ibmveth_poll(struct napi_struct *napi, int budget)
 	int frames_processed = 0;
 	unsigned long lpar_rc;
 	u16 mss = 0;
-	u8 *data;
 
 	while (frames_processed < budget) {
 		if (!ibmveth_rxq_pending_buffer(adapter))
@@ -1196,21 +1220,19 @@ static int ibmveth_poll(struct napi_struct *napi, int budget)
 			__sum16 iph_check = 0;
 
 			skb = ibmveth_rxq_get_buffer(adapter);
-			data = ibmveth_rxq_get_data(adapter);
 			/* if the large packet bit is set in the rx queue
 			 * descriptor, the mss will be written by PHYP eight
 			 * bytes from the start of the rx buffer, which is
 			 * skb->data at this stage
 			 */
 			if (lrg_pkt) {
-				__be64 *rxmss = (__be64 *)(data + 8);
+				__be64 *rxmss = (__be64 *)(skb->data + 8);
 
 				mss = (u16)be64_to_cpu(*rxmss);
 			}
-			
-			skb_copy_to_linear_data(skb, data + offset, length);
+
 			ibmveth_rxq_harvest_buffer(adapter);
-			/* skb_reserve(skb, offset); */
+			skb_reserve(skb, offset);
 			skb_put(skb, length);
 			skb->protocol = eth_type_trans(skb, netdev);
 
@@ -1567,7 +1589,10 @@ static int ibmveth_probe(struct vio_dev *dev, const struct vio_device_id *id)
 
 	ibmveth_set_features(netdev, netdev->features);
 	rc = -ENOMEM;
-	
+
+	BUILD_BUG_ON(sizeof(struct ibmveth_buffer) > IBMVETH_BUFFER_SIZE);
+	BUILD_BUG_ON((sizeof(struct ibmveth_rx_64k_dma_buf) *IBMVETH_NUM_64K_RX_BUFS)  > IBMVETH_BUFFER_SIZE);
+
 	buf = (void *)__get_free_pages(GFP_KERNEL,
 		                       get_order(IBMVETH_BUFFER_SIZE));
 							

@@ -101,7 +101,7 @@ static inline long h_illan_attributes(unsigned long unit_address,
 #define IBMVETH_MAX_RXQ_SIZE 4096
 #define IBMVETH_NUM_TX_BUFS 16
 
-#define IBMVETH_NUM_64K_RX_BUFS 256
+#define IBMVETH_NUM_64K_RX_BUFS 128
 #define IBMVETH_NUM_2K_RX_BUFS 512
 #define IBMVETH_NUM_512_RX_BUFS 512
 
@@ -120,6 +120,7 @@ struct ibmveth_buff_pool {
     atomic_t available;
     u32 consumer_index;
     u32 producer_index;
+    spinlock_t lock;
     u16 *free_map;
     dma_addr_t *dma_addr;
     struct sk_buff **skbuff;
@@ -141,16 +142,18 @@ struct ibmveth_tx_dma_buf {
         u8 data[64*1024];
 };
 
+#define IBMVETH_BUF_SZ(sz) ((sz) + L1_CACHE_BYTES + SKB_DATA_ALIGN(sizeof(struct skb_shared_info)))
+
 struct ibmveth_rx_64k_dma_buf {
-        u8 data[64*1024];
+        u8 data[IBMVETH_BUF_SZ(64*1024)];
 };
 
 struct ibmveth_rx_2k_dma_buf {
-        u8 data[2*1024];
+        u8 data[IBMVETH_BUF_SZ(2048)];
 };
 
 struct ibmveth_rx_512_dma_buf {
-        u8 data[512];
+        u8 data[IBMVETH_BUF_SZ(512)];;
 };
 
 struct ibmveth_rx_q_entry {
