@@ -157,7 +157,8 @@ static void ibmveth_init_buffer_pool(struct ibmveth_buff_pool *pool,
 static int ibmveth_alloc_buffer_pool(struct ibmveth_buff_pool *pool, struct ibmveth_adapter *adapter)
 {
 	int i;
-
+	dma_addr_t dma_addr;
+	struct sk_buff *skb;
 	pool->free_map = kmalloc_array(pool->size, sizeof(u16), GFP_KERNEL);
 
 	if (!pool->free_map)
@@ -182,7 +183,8 @@ static int ibmveth_alloc_buffer_pool(struct ibmveth_buff_pool *pool, struct ibmv
 	}
 	// allocate all skb's for this pool
 	for (i = 0; i < pool->size; i++) {
-		pool->skbuff[i] = netdev_alloc_skb(adapter->netdev, pool->buff_size);
+		skb = netdev_alloc_skb(adapter->netdev, pool->buff_size);
+		pool->skbuff[i] = skb;
 		dma_addr = dma_map_single(&adapter->vdev->dev, skb->data,
 		 		pool->buff_size, DMA_FROM_DEVICE);
 		pool->dma_addr[i] = dma_addr;
@@ -204,22 +206,30 @@ static inline void ibmveth_flush_buffer(void *addr, unsigned long length)
 	for (offset = 0; offset < length; offset += SMP_CACHE_BYTES)
 		asm("dcbfl %0,%1" :: "b" (addr), "r" (offset));
 }
-
+static void ibmveth_remove_buffer_from_pool(struct ibmveth_adapter *adapter,
+					    u64 correlator);
 static void reuse_skb(struct sk_buff *skb) {
 	struct ibmveth_adapter *adapter = netdev_priv(skb->dev);
 	u64 correlator;
 	int pool_index, buff_index, i;
+	unsigned char *skb_data = skb->data;
 
 	for (i = 0; i < IBMVETH_NUM_BUFF_POOLS; i++) {
-		if (skb >= adapter->rx_buff_pool[i]->skbuff[0] && skb <= adapter->rx_buff_pool[i]->skbuff[adapter->rx_buff_pool[i]->size - 1]) {
-			buff_index = (skb - adapter->rx_buff_pool[i]->skbuff[0]) / (sizeof(struct sk_buff *));
+		if (skb >= adapter->rx_buff_pool[i].skbuff[0] && skb <= adapter->rx_buff_pool[i].skbuff[adapter->rx_buff_pool[i].size - 1]) {
+			buff_index = (skb - adapter->rx_buff_pool[i].skbuff[0]) / (sizeof(struct sk_buff *));
 			pool_index = i;
 			break;
 		}
 
 	}
+	// tell skb_free not to free the data portion
+	skb->cloned = 1;
+	atomic_inc(&(skb_shinfo(skb)->dataref));
+	// memset data portion to zero
 	memset(skb, 0, offsetof(struct sk_buff, tail)); //set all of its contents to 0
-	__build_skb_around(skb, data, frag_size); // set it up for next use
+
+	kfree_skb(skb);
+	adapter->rx_buff_pool[pool_index].skbuff[buff_index] = build_skb(skb_data, 0);
 	// tell replenish_buffer_pool that we are done with this skb and it can be sent to hardware again
 	// to do that, we add the index of the skb to the free_map
 	correlator = ((u64)pool_index << 32) | buff_index;
