@@ -154,7 +154,7 @@ static void ibmveth_init_buffer_pool(struct ibmveth_buff_pool *pool,
 }
 
 /* allocate and setup an buffer pool - called during open */
-static int ibmveth_alloc_buffer_pool(struct ibmveth_buff_pool *pool)
+static int ibmveth_alloc_buffer_pool(struct ibmveth_buff_pool *pool, struct ibmveth_adapter *adapter)
 {
 	int i;
 
@@ -180,7 +180,13 @@ static int ibmveth_alloc_buffer_pool(struct ibmveth_buff_pool *pool)
 		pool->free_map = NULL;
 		return -1;
 	}
-
+	// allocate all skb's for this pool
+	for (i = 0; i < pool->size; i++) {
+		pool->skbuff[i] = netdev_alloc_skb(adapter->netdev, pool->buff_size);
+		dma_addr = dma_map_single(&adapter->vdev->dev, skb->data,
+		 		pool->buff_size, DMA_FROM_DEVICE);
+		pool->dma_addr[i] = dma_addr;
+	}
 	for (i = 0; i < pool->size; ++i)
 		pool->free_map[i] = i;
 
@@ -197,6 +203,27 @@ static inline void ibmveth_flush_buffer(void *addr, unsigned long length)
 
 	for (offset = 0; offset < length; offset += SMP_CACHE_BYTES)
 		asm("dcbfl %0,%1" :: "b" (addr), "r" (offset));
+}
+
+static void reuse_skb(struct sk_buff *skb) {
+	struct ibmveth_adapter *adapter = netdev_priv(skb->dev);
+	u64 correlator;
+	int pool_index, buff_index, i;
+
+	for (i = 0; i < IBMVETH_NUM_BUFF_POOLS; i++) {
+		if (skb >= adapter->rx_buff_pool[i]->skbuff[0] && skb <= adapter->rx_buff_pool[i]->skbuff[adapter->rx_buff_pool[i]->size - 1]) {
+			buff_index = (skb - adapter->rx_buff_pool[i]->skbuff[0]) / (sizeof(struct sk_buff *));
+			pool_index = i;
+			break;
+		}
+
+	}
+	memset(skb, 0, offsetof(struct sk_buff, tail)); //set all of its contents to 0
+	__build_skb_around(skb, data, frag_size); // set it up for next use
+	// tell replenish_buffer_pool that we are done with this skb and it can be sent to hardware again
+	// to do that, we add the index of the skb to the free_map
+	correlator = ((u64)pool_index << 32) | buff_index;
+	ibmveth_remove_buffer_from_pool(adapter, correlator);
 }
 
 /* replenish the buffers for a pool.  note that we don't need to
@@ -219,7 +246,7 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 	for (i = 0; i < count; ++i) {
 		union ibmveth_buf_desc desc;
 
-		skb = netdev_alloc_skb(adapter->netdev, pool->buff_size);
+		// skb = netdev_alloc_skb(adapter->netdev, pool->buff_size);
 
 		if (!skb) {
 			netdev_dbg(adapter->netdev,
@@ -235,18 +262,20 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 		index = pool->free_map[free_index];
 
 		BUG_ON(index == IBM_VETH_INVALID_MAP);
-		BUG_ON(pool->skbuff[index] != NULL);
+		// condition no longer true since we are only allocating once
+		// we will now rely on free_map for whether or not we should add a new logical lan
+		// BUG_ON(pool->skbuff[index] != NULL);
 
-		dma_addr = dma_map_single(&adapter->vdev->dev, skb->data,
-				pool->buff_size, DMA_FROM_DEVICE);
+		// dma_addr = dma_map_single(&adapter->vdev->dev, skb->data,
+		// 		pool->buff_size, DMA_FROM_DEVICE);
 
-		if (dma_mapping_error(&adapter->vdev->dev, dma_addr))
-			goto failure;
+		// if (dma_mapping_error(&adapter->vdev->dev, dma_addr))
+		// 	goto failure;
 
 		pool->free_map[free_index] = IBM_VETH_INVALID_MAP;
-		pool->dma_addr[index] = dma_addr;
-		pool->skbuff[index] = skb;
-
+		dma_addr = pool->dma_addr[index];
+		skb = pool->skbuff[index];
+		skb->destructor = reuse_skb;
 		correlator = ((u64)pool->index << 32) | index;
 		*(u64 *)skb->data = correlator;
 
@@ -363,21 +392,21 @@ static void ibmveth_remove_buffer_from_pool(struct ibmveth_adapter *adapter,
 	unsigned int pool  = correlator >> 32;
 	unsigned int index = correlator & 0xffffffffUL;
 	unsigned int free_index;
-	struct sk_buff *skb;
+	// struct sk_buff *skb;
 
 	BUG_ON(pool >= IBMVETH_NUM_BUFF_POOLS);
 	BUG_ON(index >= adapter->rx_buff_pool[pool].size);
 
-	skb = adapter->rx_buff_pool[pool].skbuff[index];
+	// skb = adapter->rx_buff_pool[pool].skbuff[index];
 
-	BUG_ON(skb == NULL);
+	// BUG_ON(skb == NULL);
 
-	adapter->rx_buff_pool[pool].skbuff[index] = NULL;
+	//adapter->rx_buff_pool[pool].skbuff[index] = NULL;
 
-	dma_unmap_single(&adapter->vdev->dev,
-			 adapter->rx_buff_pool[pool].dma_addr[index],
-			 adapter->rx_buff_pool[pool].buff_size,
-			 DMA_FROM_DEVICE);
+	// dma_unmap_single(&adapter->vdev->dev,
+	// 		 adapter->rx_buff_pool[pool].dma_addr[index],
+	// 		 adapter->rx_buff_pool[pool].buff_size,
+	// 		 DMA_FROM_DEVICE);
 
 	free_index = adapter->rx_buff_pool[pool].producer_index;
 	adapter->rx_buff_pool[pool].producer_index++;
@@ -389,6 +418,7 @@ static void ibmveth_remove_buffer_from_pool(struct ibmveth_adapter *adapter,
 	mb();
 
 	atomic_dec(&(adapter->rx_buff_pool[pool].available));
+
 }
 
 /* get the current buffer on the rx queue */
@@ -572,7 +602,7 @@ static int ibmveth_open(struct net_device *netdev)
 	for (i = 0; i < IBMVETH_NUM_BUFF_POOLS; i++) {
 		if (!adapter->rx_buff_pool[i].active)
 			continue;
-		if (ibmveth_alloc_buffer_pool(&adapter->rx_buff_pool[i])) {
+		if (ibmveth_alloc_buffer_pool(&adapter->rx_buff_pool[i], adapter)) {
 			netdev_err(netdev, "unable to alloc pool\n");
 			adapter->rx_buff_pool[i].active = 0;
 			rc = -ENOMEM;
@@ -1345,24 +1375,24 @@ static int ibmveth_poll(struct napi_struct *napi, int budget)
 				mss = (u16)be64_to_cpu(*rxmss);
 			}
 
-			new_skb = NULL;
-			if (length < rx_copybreak)
-				new_skb = netdev_alloc_skb(netdev, length);
+			// new_skb = NULL;
+			// if (length < rx_copybreak)
+			// 	new_skb = netdev_alloc_skb(netdev, length);
 
-			if (new_skb) {
-				skb_copy_to_linear_data(new_skb,
-							skb->data + offset,
-							length);
-				if (rx_flush)
-					ibmveth_flush_buffer(skb->data,
-						length + offset);
-				if (!ibmveth_rxq_recycle_buffer(adapter))
-					kfree_skb(skb);
-				skb = new_skb;
-			} else {
+			// if (new_skb) {
+			// 	skb_copy_to_linear_data(new_skb,
+			// 				skb->data + offset,
+			// 				length);
+			// 	if (rx_flush)
+			// 		ibmveth_flush_buffer(skb->data,
+			// 			length + offset);
+			// 	if (!ibmveth_rxq_recycle_buffer(adapter))
+			// 		kfree_skb(skb);
+			// 	skb = new_skb;
+			// } else {
 				ibmveth_rxq_harvest_buffer(adapter);
 				skb_reserve(skb, offset);
-			}
+			// }
 
 			skb_put(skb, length);
 			skb->protocol = eth_type_trans(skb, netdev);
@@ -1794,7 +1824,7 @@ static ssize_t veth_pool_store(struct kobject *kobj, struct attribute *attr,
 	if (attr == &veth_active_attr) {
 		if (value && !pool->active) {
 			if (netif_running(netdev)) {
-				if (ibmveth_alloc_buffer_pool(pool)) {
+				if (ibmveth_alloc_buffer_pool(pool, adapter)) {
 					netdev_err(netdev,
 						   "unable to alloc pool\n");
 					return -ENOMEM;
