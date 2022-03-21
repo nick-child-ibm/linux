@@ -245,7 +245,7 @@ static void reuse_skb(struct sk_buff *skb) {
 	// memset data portion to zero
 
 	netdev_dbg(adapter->netdev, "removing buffer from pool %d, at skb %d (max is %d and %d)\n", pool_index, buff_index, IBMVETH_NUM_BUFF_POOLS, adapter->rx_buff_pool[pool_index].size);
-	//memset(skb, 0, offsetof(struct sk_buff, tail)); //set all of its contents to 0
+//	memset(skb, 0, offsetof(struct sk_buff, tail)); //set all of its contents to 0
 
 //	kfree_skb(skb);
 	// tell replenish_buffer_pool that we are done with this skb and it can be sent to hardware again
@@ -281,7 +281,16 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 	spin_lock(&pool->lock);
 	for (i = 0; i < count; ++i) {
 		union ibmveth_buf_desc desc;
-		skb = build_skb(&pool->mapped_buff[pool->skb_size * i], pool->skb_size);
+
+		free_index = pool->consumer_index;
+                pool->consumer_index++;
+                if (pool->consumer_index >= pool->size)
+	                pool->consumer_index = 0;
+		index = pool->free_map[free_index];
+		BUG_ON(index == IBM_VETH_INVALID_MAP);
+		BUG_ON(pool->skbuff[index] != NULL);
+		memset(&pool->mapped_buff[pool->skb_size * index], 0 , pool->skb_size);
+		skb = build_skb(&pool->mapped_buff[pool->skb_size * index], pool->skb_size);
 		// skb = netdev_alloc_skb(adapter->netdev, pool->buff_size);
 
 		if (!skb) {
@@ -291,15 +300,6 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 			break;
 		}
 
-		free_index = pool->consumer_index;
-		pool->consumer_index++;
-		if (pool->consumer_index >= pool->size)
-			pool->consumer_index = 0;
-		index = pool->free_map[free_index];
-
-		BUG_ON(index == IBM_VETH_INVALID_MAP);
-		
-		BUG_ON(pool->skbuff[index] != NULL);
 		
 		pool->skbuff[index] = skb;
 		// dma_addr = dma_map_single(&adapter->vdev->dev, skb->data,
@@ -1383,7 +1383,7 @@ static int ibmveth_poll(struct napi_struct *napi, int budget)
 	int frames_processed = 0;
 	unsigned long lpar_rc;
 	u16 mss = 0;
-
+netdev_dbg(netdev, "POLL BEGIN\n");
 	while (frames_processed < budget) {
 		if (!ibmveth_rxq_pending_buffer(adapter))
 			break;
@@ -1401,15 +1401,16 @@ static int ibmveth_poll(struct napi_struct *napi, int budget)
 			int csum_good = ibmveth_rxq_csum_good(adapter);
 			int lrg_pkt = ibmveth_rxq_large_packet(adapter);
 			__sum16 iph_check = 0;
-
+			netdev_dbg(netdev, "Getting skb\n");
 			skb = ibmveth_rxq_get_buffer(adapter);
-
+			netdev_dbg(netdev, "Got skb\n");
 			/* if the large packet bit is set in the rx queue
 			 * descriptor, the mss will be written by PHYP eight
 			 * bytes from the start of the rx buffer, which is
 			 * skb->data at this stage
 			 */
 			if (lrg_pkt) {
+				netdev_dbg(netdev, "Working with a large packet\n");
 				__be64 *rxmss = (__be64 *)(skb->data + 8);
 
 				mss = (u16)be64_to_cpu(*rxmss);
@@ -1430,22 +1431,27 @@ static int ibmveth_poll(struct napi_struct *napi, int budget)
 			// 		kfree_skb(skb);
 			// 	skb = new_skb;
 			// } else {
+			netdev_dbg(netdev, "Going to harvest\n");
 				ibmveth_rxq_harvest_buffer(adapter);
+			netdev_dbg(netdev, "Going to reserve\n");
 				skb_reserve(skb, offset);
 			// }
-
+			netdev_dbg(netdev, "Got reserved\n");
 			skb_put(skb, length);
+			netdev_dbg(netdev, "skb put complete\n");
 			skb->protocol = eth_type_trans(skb, netdev);
-
+			netdev_dbg(netdev, "Got trans type\n");
 			/* PHYP without PLSO support places a -1 in the ip
 			 * checksum for large send frames.
 			 */
 			if (skb->protocol == cpu_to_be16(ETH_P_IP)) {
+				netdev_dbg(netdev, "This stuff seems sketchy\n");
 				struct iphdr *iph = (struct iphdr *)skb->data;
-
+				netdev_dbg(netdev, "almost done with sketchyness\n");
 				iph_check = iph->check;
-			}
 
+			}
+			netdev_dbg(netdev, "did prototcals\n");
 			if ((length > netdev->mtu + ETH_HLEN) ||
 			    lrg_pkt || iph_check == 0xffff) {
 				ibmveth_rx_mss_helper(skb, mss, lrg_pkt);
@@ -1456,7 +1462,7 @@ static int ibmveth_poll(struct napi_struct *napi, int budget)
 				skb->ip_summed = CHECKSUM_UNNECESSARY;
 				ibmveth_rx_csum_helper(skb, adapter);
 			}
-
+			netdev_dbg(netdev, "sending skb\n");
 			napi_gro_receive(napi, skb);	/* send it up */
 
 			netdev->stats.rx_packets++;
@@ -1464,10 +1470,11 @@ static int ibmveth_poll(struct napi_struct *napi, int budget)
 			frames_processed++;
 		}
 	}
-
+	netdev_dbg(netdev, "replenishing \n");
 	ibmveth_replenish_task(adapter);
 
 	if (frames_processed < budget) {
+		netdev_dbg(netdev, "In here? hmm\n");
 		napi_complete_done(napi, frames_processed);
 
 		/* We think we are done - reenable interrupts,
@@ -1484,6 +1491,7 @@ static int ibmveth_poll(struct napi_struct *napi, int budget)
 					       VIO_IRQ_DISABLE);
 		}
 	}
+	netdev_dbg(netdev, "POLL COMPLETE\n");
 
 	return frames_processed;
 }
