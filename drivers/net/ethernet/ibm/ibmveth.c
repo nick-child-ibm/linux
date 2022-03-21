@@ -151,6 +151,7 @@ static void ibmveth_init_buffer_pool(struct ibmveth_buff_pool *pool,
 	pool->buff_size = buff_size;
 	pool->threshold = pool_size * 7 / 8;
 	pool->active = pool_active;
+	pool->skb_size = IBM_VETH_BUF_SIZE(pool->buff_size);
 }
 
 /* allocate and setup an buffer pool - called during open */
@@ -170,9 +171,7 @@ static int ibmveth_alloc_buffer_pool(struct ibmveth_buff_pool *pool, struct ibmv
 		pool->free_map = NULL;
 		return -1;
 	}
-
 	pool->skbuff = kcalloc(pool->size, sizeof(void *), GFP_KERNEL);
-
 	if (!pool->skbuff) {
 		kfree(pool->dma_addr);
 		pool->dma_addr = NULL;
@@ -181,11 +180,24 @@ static int ibmveth_alloc_buffer_pool(struct ibmveth_buff_pool *pool, struct ibmv
 		pool->free_map = NULL;
 		return -1;
 	}
+
+	pool->mapped_buff = kcalloc(pool->size, pool->skb_size, GFP_KERNEL);
+
+	if (!pool->mapped_buff) {
+		kfree(pool->dma_addr);
+		pool->dma_addr = NULL;
+
+		kfree(pool->free_map);
+		pool->free_map = NULL;
+
+		kfree(pool->skbuff);
+		pool->skbuff = NULL;
+
+		return -1;
+	}
 	// allocate all skb's for this pool
 	for (i = 0; i < pool->size; i++) {
-		skb = netdev_alloc_skb(adapter->netdev, pool->buff_size);
-		pool->skbuff[i] = skb;
-		dma_addr = dma_map_single(&adapter->vdev->dev, skb->data,
+		dma_addr = dma_map_single(&adapter->vdev->dev, pool->mapped_buff + (pool->skb_size * i),
 		 		pool->buff_size, DMA_FROM_DEVICE);
 		pool->dma_addr[i] = dma_addr;
 	}
@@ -216,16 +228,8 @@ static void reuse_skb(struct sk_buff *skb) {
 	unsigned char *skb_data = skb->data;
 	netdev_dbg(adapter->netdev, "freeing here1 \n");
 	for (i = 0; i < IBMVETH_NUM_BUFF_POOLS; i++) {
-		if (adapter->rx_buff_pool[i].skbuff[0] == NULL) {
-			netdev_dbg(adapter->netdev, "first skb in pool %d is NULL\n", i);
-			BUG_ON(adapter->rx_buff_pool[i].skbuff[0] == NULL);
-		}
-		if (adapter->rx_buff_pool[i].skbuff[adapter->rx_buff_pool[i].size - 1] == NULL) {
-			netdev_dbg(adapter->netdev, "last skb in pool %d is NULL\n", i);
-			BUG_ON(adapter->rx_buff_pool[i].skbuff[adapter->rx_buff_pool[i].size - 1] == NULL);
-		}
-		if (skb >= adapter->rx_buff_pool[i].skbuff[0] && skb <= adapter->rx_buff_pool[i].skbuff[adapter->rx_buff_pool[i].size - 1]) {
-			buff_index = (skb - adapter->rx_buff_pool[i].skbuff[0]) / (sizeof(struct sk_buff *));
+		if (skb->head >= adapter->rx_buff_pool[i].mapped_buff[0] && skb->head <= adapter->rx_buff_pool[i].mapped_buff[(adapter->rx_buff_pool[i].size - 1) * adapter->rx_buff_pool[i].skb_size]) {
+			buff_index = (skb->head - adapter->rx_buff_pool[i].mapped_buff[0]) / adapter->rx_buff_pool[i].skb_size;
 			pool_index = i;
 			break;
 		}
@@ -236,11 +240,11 @@ static void reuse_skb(struct sk_buff *skb) {
 	skb->cloned = 1;
 	netdev_dbg(adapter->netdev, "freeing here3\n");
 	atomic_inc(&(skb_shinfo(skb)->dataref));
-netdev_dbg(adapter->netdev, "freeing here4\n");
+	netdev_dbg(adapter->netdev, "freeing here4\n");
 	// memset data portion to zero
 
 	netdev_dbg(adapter->netdev, "removing buffer from pool %d, at skb %d (max is %d and %d)\n", pool_index, buff_index, IBMVETH_NUM_BUFF_POOLS, adapter->rx_buff_pool[pool_index].size);
-memset(skb, 0, offsetof(struct sk_buff, tail)); //set all of its contents to 0
+	memset(skb, 0, offsetof(struct sk_buff, tail)); //set all of its contents to 0
 
 	//kfree_skb(skb);
 	// tell replenish_buffer_pool that we are done with this skb and it can be sent to hardware again
@@ -252,7 +256,6 @@ memset(skb, 0, offsetof(struct sk_buff, tail)); //set all of its contents to 0
 
 	BUG_ON(buff_index >= adapter->rx_buff_pool[pool_index].size);
 
-	adapter->rx_buff_pool[pool_index].skbuff[buff_index] = build_skb(skb_data, 0);
 	netdev_dbg(adapter->netdev, "freeing here last\n");
 	ibmveth_remove_buffer_from_pool(adapter, correlator);
 }
@@ -276,16 +279,16 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 
 	for (i = 0; i < count; ++i) {
 		union ibmveth_buf_desc desc;
-
+		skb = build_skb(pool->mapped_buff[pool->skb_size * i], pool->skb_size);
 		// skb = netdev_alloc_skb(adapter->netdev, pool->buff_size);
 
-	/*	if (!skb) {
-	*		netdev_dbg(adapter->netdev,
-	*			   "replenish: unable to allocate skb\n");
-	*		adapter->replenish_no_mem++;
-	*		break;
-	*	}
-*/
+		if (!skb) {
+			netdev_dbg(adapter->netdev,
+				   "replenish: unable to allocate skb\n");
+			adapter->replenish_no_mem++;
+			break;
+		}
+
 		free_index = pool->consumer_index;
 		pool->consumer_index++;
 		if (pool->consumer_index >= pool->size)
@@ -293,11 +296,10 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 		index = pool->free_map[free_index];
 
 		BUG_ON(index == IBM_VETH_INVALID_MAP);
-		// condition no longer true since we are only allocating once
-		// we will now rely on free_map for whether or not we should add a new logical lan
-		BUG_ON(pool->skbuff[index] == NULL);
 		
-		skb = pool->skbuff[index];
+		BUG_ON(pool->skbuff[index] != NULL);
+		
+		pool->skbuff[index] = skb;
 		// dma_addr = dma_map_single(&adapter->vdev->dev, skb->data,
 		// 		pool->buff_size, DMA_FROM_DEVICE);
 
@@ -428,11 +430,11 @@ static void ibmveth_remove_buffer_from_pool(struct ibmveth_adapter *adapter,
 	BUG_ON(pool >= IBMVETH_NUM_BUFF_POOLS);
 	BUG_ON(index >= adapter->rx_buff_pool[pool].size);
 
-	// skb = adapter->rx_buff_pool[pool].skbuff[index];
+	skb = adapter->rx_buff_pool[pool].skbuff[index];
 
-	// BUG_ON(skb == NULL);
+	BUG_ON(skb == NULL);
 
-	//adapter->rx_buff_pool[pool].skbuff[index] = NULL;
+	adapter->rx_buff_pool[pool].skbuff[index] = NULL;
 
 	// dma_unmap_single(&adapter->vdev->dev,
 	// 		 adapter->rx_buff_pool[pool].dma_addr[index],
