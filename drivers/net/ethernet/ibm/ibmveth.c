@@ -216,6 +216,14 @@ static void reuse_skb(struct sk_buff *skb) {
 	unsigned char *skb_data = skb->data;
 	netdev_dbg(adapter->netdev, "freeing here1 \n");
 	for (i = 0; i < IBMVETH_NUM_BUFF_POOLS; i++) {
+		if (adapter->rx_buff_pool[i].skbuff[0] == NULL) {
+			netdev_dbg(adapter->netdev, "first skb in pool %d is NULL\n", i);
+			BUG_ON(adapter->rx_buff_pool[i].skbuff[0] == NULL);
+		}
+		if (adapter->rx_buff_pool[i].skbuff[adapter->rx_buff_pool[i].size - 1] == NULL) {
+			netdev_dbg(adapter->netdev, "last skb in pool %d is NULL\n", i);
+			BUG_ON(adapter->rx_buff_pool[i].skbuff[adapter->rx_buff_pool[i].size - 1] == NULL);
+		}
 		if (skb >= adapter->rx_buff_pool[i].skbuff[0] && skb <= adapter->rx_buff_pool[i].skbuff[adapter->rx_buff_pool[i].size - 1]) {
 			buff_index = (skb - adapter->rx_buff_pool[i].skbuff[0]) / (sizeof(struct sk_buff *));
 			pool_index = i;
