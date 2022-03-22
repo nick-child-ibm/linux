@@ -90,7 +90,7 @@ static inline long h_illan_attributes(unsigned long unit_address,
 #define h_change_logical_lan_mac(ua, mac) \
   plpar_hcall_norets(H_CHANGE_LOGICAL_LAN_MAC, ua, mac)
 
-#define IBMVETH_NUM_BUFF_POOLS 5
+#define IBMVETH_NUM_BUFF_POOLS 7
 #define IBMVETH_IO_ENTITLEMENT_DEFAULT 4243456 /* MTU of 1500 needs 4.2Mb */
 #define IBMVETH_BUFF_OH 22 /* Overhead: 14 ethernet header + 8 opaque handle */
 #define IBMVETH_MIN_MTU 68
@@ -99,10 +99,10 @@ static inline long h_illan_attributes(unsigned long unit_address,
 #define IBMVETH_FILT_LIST_SIZE 4096
 #define IBMVETH_MAX_BUF_SIZE (1024 * 128)
 
-static int pool_size[] = { 512, 1024 * 2, 1024 * 16, 1024 * 32, 1024 * 64 };
-static int pool_count[] = { 256, 512, 256, 256, 256 };
-static int pool_count_cmo[] = { 256, 512, 256, 256, 64 };
-static int pool_active[] = { 1, 1, 1, 1, 0};
+static int pool_size[] = { 512, 1024 * 2, 1024 * 16, 1024 * 16, 2 * 1024, 1024 * 16, 1024 * 2 };
+static int pool_count[] = { 512, 512, 512, 512, 512, 512, 512};
+static int pool_count_cmo[] = { 256, 512, 256, 256, 512, 256, 512 };
+static int pool_active[] = { 1, 1, 1, 1, 1, 1, 1};
 
 #define IBM_VETH_INVALID_MAP ((u16)0xffff)
 
@@ -115,6 +115,7 @@ struct ibmveth_buff_pool {
     u32 threshold;
     u32 skb_size;
     atomic_t available;
+    atomic_t in_stack;
     spinlock_t lock;
     u32 consumer_index;
     u32 producer_index;

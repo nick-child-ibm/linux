@@ -198,18 +198,34 @@ static int ibmveth_alloc_buffer_pool(struct ibmveth_buff_pool *pool, struct ibmv
 	}
 	// allocate all skb's for this pool
 	for (i = 0; i < pool->size; i++) {
-		dma_addr = dma_map_single(&adapter->vdev->dev, &pool->mapped_buff[pool->skb_size * i],
-		 		pool->buff_size, DMA_FROM_DEVICE);
+		dma_addr = dma_map_single(&adapter->vdev->dev, &pool->mapped_buff[pool->skb_size * i],pool->buff_size, DMA_FROM_DEVICE);
+		if (dma_mapping_error(&adapter->vdev->dev, dma_addr))
+		{
+			goto dma_err;
+		}
 		pool->dma_addr[i] = dma_addr;
 	}
 	for (i = 0; i < pool->size; ++i)
 		pool->free_map[i] = i;
 
 	atomic_set(&pool->available, 0);
+	atomic_set(&pool->in_stack, 0);
 	pool->producer_index = 0;
 	pool->consumer_index = 0;
 
 	return 0;
+
+dma_err:
+	for (i = 0; i > 0; i--)
+		dma_unmap_single(&adapter->vdev->dev, pool->dma_addr[i - 1], pool->buff_size, DMA_FROM_DEVICE);
+	kfree(pool->dma_addr);
+	pool->dma_addr = NULL;
+	kfree(pool->free_map);
+	pool->free_map = NULL;
+        kfree(pool->skbuff);
+	pool->skbuff = NULL;
+
+	return -1;
 }
 
 static inline void ibmveth_flush_buffer(void *addr, unsigned long length)
@@ -268,7 +284,7 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 					  struct ibmveth_buff_pool *pool)
 {
 	u32 i;
-	u32 count = pool->size - atomic_read(&pool->available);
+	u32 count = pool->size - (atomic_read(&pool->available) + atomic_read(&pool->in_stack));
 	u32 buffers_added = 0;
 	struct sk_buff *skb;
 	unsigned int free_index, index;
@@ -336,10 +352,12 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 	//netdev_dbg(adapter->netdev, "Replenish %d complete\n", adapter->replenish_task_cycles);
 	mb();
 	atomic_add(buffers_added, &(pool->available));
+	//netdev_dbg(adapter->netdev, "Replenished %d buffers, now %d + %d(stack)/%d  are available either in hardware or the network stack.\n", buffers_added, atomic_read(&(pool->available)),atomic_read(&(pool->in_stack)), pool->size); 
 	spin_unlock(&pool->lock);
 	return;
 
 failure:
+	netdev_dbg(adapter->netdev, "WE FAILED!\n");
 	pool->free_map[free_index] = index;
 	pool->skbuff[index] = NULL;
 	if (pool->consumer_index == 0)
@@ -381,10 +399,18 @@ static void ibmveth_replenish_task(struct ibmveth_adapter *adapter)
 		struct ibmveth_buff_pool *pool = &adapter->rx_buff_pool[i];
 
 		if (pool->active &&
-		    (atomic_read(&pool->available) < pool->threshold))
+		    (
+		     (atomic_read(&pool->available) 
+		      + atomic_read(&pool->in_stack) < pool->threshold)
+		     || (atomic_read(&pool->in_stack) >= pool->threshold ) 
+		    )
+		   ) {
+			if (atomic_read(&pool->in_stack) > pool->threshold)
+				netdev_dbg(adapter->netdev, "Pool[%d] has too many %d/%d skb's in network stack, attempting to make room\n", i, atomic_read(&pool->in_stack), pool->size);
 			ibmveth_replenish_buffer_pool(adapter, pool);
+	
+		}
 	}
-
 	ibmveth_update_rx_no_buffer(adapter);
 }
 
@@ -456,8 +482,9 @@ static void ibmveth_remove_buffer_from_pool(struct ibmveth_adapter *adapter,
 
 	mb();
 
-	atomic_dec(&(adapter->rx_buff_pool[pool].available));
+	atomic_dec(&(adapter->rx_buff_pool[pool].in_stack));
 	//spin_unlock(&adapter->rx_buff_pool[pool].lock);
+	ibmveth_replenish_task(adapter);
 
 }
 
@@ -518,8 +545,15 @@ out:
 
 static void ibmveth_rxq_harvest_buffer(struct ibmveth_adapter *adapter)
 {
+	int pool = adapter->rx_queue.queue_addr[ adapter->rx_queue.index].correlator >> 32;
 	//ibmveth_remove_buffer_from_pool(adapter, adapter->rx_queue.queue_addr[adapter->rx_queue.index].correlator);
+	atomic_inc(&(adapter->rx_buff_pool[pool].in_stack));
+	atomic_dec(&(adapter->rx_buff_pool[pool].available));
 
+	int in_stack = atomic_read(&(adapter->rx_buff_pool[pool].in_stack));
+	int available = atomic_read(&(adapter->rx_buff_pool[pool].available));
+	if (in_stack > available)
+		netdev_dbg(adapter->netdev, "[%d] %d + %d (stack) / %d", pool, available, in_stack, adapter->rx_buff_pool[pool].size);
 	if (++adapter->rx_queue.index == adapter->rx_queue.num_slots) {
 		adapter->rx_queue.index = 0;
 		adapter->rx_queue.toggle = !adapter->rx_queue.toggle;
@@ -1403,7 +1437,8 @@ static int ibmveth_poll(struct napi_struct *napi, int budget)
 			__sum16 iph_check = 0;
 //			netdev_dbg(netdev, "Getting skb\n");
 			skb = ibmveth_rxq_get_buffer(adapter);
-//			netdev_dbg(netdev, "Got skb\n");
+			
+			//			netdev_dbg(netdev, "Got skb\n");
 			/* if the large packet bit is set in the rx queue
 			 * descriptor, the mss will be written by PHYP eight
 			 * bytes from the start of the rx buffer, which is
@@ -1464,14 +1499,14 @@ static int ibmveth_poll(struct napi_struct *napi, int budget)
 			}
 //			netdev_dbg(netdev, "sending skb\n");
 			napi_gro_receive(napi, skb);	/* send it up */
-
 			netdev->stats.rx_packets++;
 			netdev->stats.rx_bytes += length;
 			frames_processed++;
 		}
 	}
 	//netdev_dbg(netdev, "replenishing \n");
-	ibmveth_replenish_task(adapter);
+	//if (adapter->replenish_task_cycles == 0)
+		ibmveth_replenish_task(adapter);
 
 	if (frames_processed < budget) {
 	//	netdev_dbg(netdev, "In here? hmm\n");
