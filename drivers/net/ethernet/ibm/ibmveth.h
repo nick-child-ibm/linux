@@ -101,7 +101,7 @@ static inline long h_illan_attributes(unsigned long unit_address,
 
 static int pool_size[] = { 512, 1024 * 2, 1024 * 16, 1024 * 16, 2 * 1024, 1024 * 16, 1024 * 2 };
 static int pool_count[] = { 512, 512, 512, 512, 512, 512, 512};
-static int pool_count_cmo[] = { 256, 512, 256, 256, 512, 256, 512 };
+static int pool_count_cmo[] = { 512, 512, 512, 512, 512, 512, 512 };
 static int pool_active[] = { 1, 1, 1, 1, 1, 1, 1};
 
 #define IBM_VETH_INVALID_MAP ((u16)0xffff)
