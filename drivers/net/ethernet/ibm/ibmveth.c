@@ -486,6 +486,7 @@ static void ibmveth_remove_buffer_from_pool(struct ibmveth_adapter *adapter,
 
 	atomic_dec(&(adapter->rx_buff_pool[pool].in_stack));
 	//spin_unlock(&adapter->rx_buff_pool[pool].lock);
+	netdev_dbg(adapter->netdev, "[%d][%d] freed\n", pool, index);
 	ibmveth_replenish_task(adapter);
 
 }
@@ -548,6 +549,8 @@ out:
 static void ibmveth_rxq_harvest_buffer(struct ibmveth_adapter *adapter)
 {
 	int pool = adapter->rx_queue.queue_addr[ adapter->rx_queue.index].correlator >> 32;
+	int index = adapter->rx_queue.queue_addr[ adapter->rx_queue.index].correlator & 0xffffffffUL;
+	netdev_dbg(adapter->netdev, "[%d][%d] sent\n", pool, index);
 	//ibmveth_remove_buffer_from_pool(adapter, adapter->rx_queue.queue_addr[adapter->rx_queue.index].correlator);
 	atomic_inc(&(adapter->rx_buff_pool[pool].in_stack));
 	atomic_dec(&(adapter->rx_buff_pool[pool].available));
