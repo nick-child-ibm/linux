@@ -300,7 +300,7 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 			break;
 		}
 
-		
+		skb_reserve(skb, NET_SKB_PAD);
 		pool->skbuff[index] = skb;
 		// dma_addr = dma_map_single(&adapter->vdev->dev, skb->data,
 		// 		pool->buff_size, DMA_FROM_DEVICE);
@@ -309,7 +309,7 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 		// 	goto failure;
 
 		pool->free_map[free_index] = IBM_VETH_INVALID_MAP;
-		dma_addr = pool->dma_addr[index];
+		dma_addr = pool->dma_addr[index] + NET_SKB_PAD;
 		skb->destructor = reuse_skb;
 		correlator = ((u64)pool->index << 32) | index;
 		*(u64 *)skb->data = correlator;
@@ -435,7 +435,7 @@ static void ibmveth_remove_buffer_from_pool(struct ibmveth_adapter *adapter,
 	BUG_ON(pool >= IBMVETH_NUM_BUFF_POOLS);
 	BUG_ON(index >= adapter->rx_buff_pool[pool].size);
 
-	spin_lock(&adapter->rx_buff_pool[pool].lock);
+	//spin_lock(&adapter->rx_buff_pool[pool].lock);
 	skb = adapter->rx_buff_pool[pool].skbuff[index];
 
 	BUG_ON(skb == NULL);
@@ -457,7 +457,7 @@ static void ibmveth_remove_buffer_from_pool(struct ibmveth_adapter *adapter,
 	mb();
 
 	atomic_dec(&(adapter->rx_buff_pool[pool].available));
-	spin_unlock(&adapter->rx_buff_pool[pool].lock);
+	//spin_unlock(&adapter->rx_buff_pool[pool].lock);
 
 }
 
@@ -496,7 +496,7 @@ static int ibmveth_rxq_recycle_buffer(struct ibmveth_adapter *adapter)
 
 	desc.fields.flags_len = IBMVETH_BUF_VALID |
 		adapter->rx_buff_pool[pool].buff_size;
-	desc.fields.address = adapter->rx_buff_pool[pool].dma_addr[index];
+	desc.fields.address = adapter->rx_buff_pool[pool].dma_addr[index] + NET_SKB_PAD;
 
 	lpar_rc = h_add_logical_lan_buffer(adapter->vdev->unit_address, desc.desc);
 
