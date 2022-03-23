@@ -334,12 +334,12 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 		desc.fields.flags_len = IBMVETH_BUF_VALID | pool->buff_size;
 		desc.fields.address = dma_addr;
 
-		if (rx_flush) {
-			unsigned int len = min(pool->buff_size,
-						adapter->netdev->mtu +
-						IBMVETH_BUFF_OH);
-			ibmveth_flush_buffer(skb->data, len);
-		}
+	//	if (rx_flush) {
+	//		unsigned int len = min(pool->buff_size,
+	//					adapter->netdev->mtu +
+	//					IBMVETH_BUFF_OH);
+	//		ibmveth_flush_buffer(skb->data, len);
+	//	}
 		lpar_rc = h_add_logical_lan_buffer(adapter->vdev->unit_address,
 						   desc.desc);
 
@@ -1491,6 +1491,7 @@ static int ibmveth_poll(struct napi_struct *napi, int budget)
 //			netdev_dbg(netdev, "Going to harvest\n");
 				ibmveth_rxq_harvest_buffer(adapter);
 //			netdev_dbg(netdev, "Going to reserve\n");
+				netdev_dbg(netdev, "reserving %d, puting %d\n",offset, length ); 
 				skb_reserve(skb, offset);
 			// }
 //			netdev_dbg(netdev, "Got reserved\n");
