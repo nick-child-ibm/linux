@@ -198,7 +198,7 @@ static int ibmveth_alloc_buffer_pool(struct ibmveth_buff_pool *pool, struct ibmv
 	}
 	// allocate all skb's for this pool
 	for (i = 0; i < pool->size; i++) {
-		dma_addr = dma_map_single(&adapter->vdev->dev, &pool->mapped_buff[pool->skb_size * i],pool->buff_size, DMA_FROM_DEVICE);
+		dma_addr = dma_map_single(&adapter->vdev->dev, (&pool->mapped_buff[pool->skb_size * i]) + NET_SKB_PAD, pool->buff_size - NET_SKB_PAD, DMA_FROM_DEVICE);
 		if (dma_mapping_error(&adapter->vdev->dev, dma_addr))
 		{
 			goto dma_err;
@@ -212,7 +212,8 @@ static int ibmveth_alloc_buffer_pool(struct ibmveth_buff_pool *pool, struct ibmv
 	atomic_set(&pool->in_stack, 0);
 	pool->producer_index = 0;
 	pool->consumer_index = 0;
-
+	
+	pool->counter = kcalloc(pool->size, sizeof(*pool->counter), GFP_KERNEL);
 	return 0;
 
 dma_err:
@@ -316,7 +317,7 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 			break;
 		}
 
-		//skb_reserve(skb, NET_SKB_PAD);
+		skb_reserve(skb, NET_SKB_PAD);
 		pool->skbuff[index] = skb;
 		// dma_addr = dma_map_single(&adapter->vdev->dev, skb->data,
 		// 		pool->buff_size, DMA_FROM_DEVICE);
@@ -329,7 +330,7 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 		skb->destructor = reuse_skb;
 		correlator = ((u64)pool->index << 32) | index;
 		*(u64 *)skb->data = correlator;
-
+		netdev_dbg(adapter->netdev, " Diff between skb->data and mapped_buff is %d\n", skb->data - &pool->mapped_buff[pool->skb_size * index]);
 		desc.fields.flags_len = IBMVETH_BUF_VALID | pool->buff_size;
 		desc.fields.address = dma_addr;
 
@@ -486,7 +487,9 @@ static void ibmveth_remove_buffer_from_pool(struct ibmveth_adapter *adapter,
 
 	atomic_dec(&(adapter->rx_buff_pool[pool].in_stack));
 	//spin_unlock(&adapter->rx_buff_pool[pool].lock);
-	netdev_dbg(adapter->netdev, "[%d][%d] freed\n", pool, index);
+	//netdev_dbg(adapter->netdev, "[%d][%d] freed\n", pool, index);
+	adapter->rx_buff_pool[pool].counter[index][1]++;
+	adapter->rx_buff_pool[pool].counter[index][2] = ktime_get_ns() - adapter->rx_buff_pool[pool].counter[index][2];
 	ibmveth_replenish_task(adapter);
 
 }
@@ -550,11 +553,13 @@ static void ibmveth_rxq_harvest_buffer(struct ibmveth_adapter *adapter)
 {
 	int pool = adapter->rx_queue.queue_addr[ adapter->rx_queue.index].correlator >> 32;
 	int index = adapter->rx_queue.queue_addr[ adapter->rx_queue.index].correlator & 0xffffffffUL;
-	netdev_dbg(adapter->netdev, "[%d][%d] sent\n", pool, index);
+	//netdev_dbg(adapter->netdev, "[%d][%d] sent\n", pool, index);
 	//ibmveth_remove_buffer_from_pool(adapter, adapter->rx_queue.queue_addr[adapter->rx_queue.index].correlator);
 	atomic_inc(&(adapter->rx_buff_pool[pool].in_stack));
 	atomic_dec(&(adapter->rx_buff_pool[pool].available));
-
+	 
+	adapter->rx_buff_pool[pool].counter[index][0] ++;
+	adapter->rx_buff_pool[pool].counter[index][2]  = ktime_get_ns();
 	int in_stack = atomic_read(&(adapter->rx_buff_pool[pool].in_stack));
 	int available = atomic_read(&(adapter->rx_buff_pool[pool].available));
 	if (in_stack > available)
@@ -748,6 +753,18 @@ out:
 	return rc;
 }
 
+void ibmveth_skb_count(struct ibmveth_adapter *adapter) {
+	int i, j;
+	for (i = 0; i < IBMVETH_NUM_BUFF_POOLS; i++) {
+		struct ibmveth_buff_pool *pool = &adapter->rx_buff_pool[i];
+		for (j = 0; j < pool->size; j++) {	
+			if  (pool->counter[j][0] > pool->counter[j][1])
+				pool->counter[j][2] = ktime_get_ns() - pool->counter[j][2];
+netdev_dbg(adapter->netdev, "pool[%lu][%lu] = sent %lu, free %lu, %lu jiffs\n", 
+		i, j , pool->counter[j][0], pool->counter[j][1], pool->counter[j][2]) ;
+		}
+	}
+}
 static int ibmveth_close(struct net_device *netdev)
 {
 	struct ibmveth_adapter *adapter = netdev_priv(netdev);
@@ -755,8 +772,8 @@ static int ibmveth_close(struct net_device *netdev)
 	long lpar_rc;
 	int i;
 
-	netdev_dbg(netdev, "close starting\n");
-
+	netdev_dbg(netdev, "close starting, printing\n");
+	ibmveth_skb_count(adapter);
 	napi_disable(&adapter->napi);
 
 	if (!adapter->pool_config)

@@ -100,7 +100,7 @@ static inline long h_illan_attributes(unsigned long unit_address,
 #define IBMVETH_MAX_BUF_SIZE (1024 * 128)
 
 static int pool_size[] = { 512, 1024 * 2, 1024 * 16, 1024 * 16, 2 * 1024, 1024 * 16, 1024 * 2 };
-static int pool_count[] = { 4, 4, 4, 4, 4, 4, 4};
+static int pool_count[] = { 8, 8, 8, 8, 8, 8, 8};
 static int pool_count_cmo[] = { 512, 512, 512, 512, 512, 512, 512 };
 static int pool_active[] = { 1, 1, 1, 1, 1, 1, 1};
 
@@ -125,6 +125,7 @@ struct ibmveth_buff_pool {
     u8 *mapped_buff;
     int active;
     struct kobject kobj;
+    unsigned long (*counter)[3];
 };
 
 struct ibmveth_rx_q {
