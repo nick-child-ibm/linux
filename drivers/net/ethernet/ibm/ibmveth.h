@@ -110,6 +110,7 @@ static int pool_active[] = { 1, 1, 1, 1, 1, 1, 1};
 
 struct ibmveth_buff_pool {
     u32 size;
+    u32 id;
     u32 index;
     u32 buff_size;
     u32 threshold;
