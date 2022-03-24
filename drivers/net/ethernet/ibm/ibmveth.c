@@ -549,6 +549,7 @@ static int ibmveth_open(struct net_device *netdev)
 			netdev_err(netdev, "unable to map transmit pages\n");
 			goto out_unmap_tx_dma;
 		}
+		spin_lock_init(&adapter->tx_lock[i]);
 	}
 
 
@@ -1137,7 +1138,7 @@ retry_bounce:
 	// 			  skb_headlen(skb), DMA_TO_DEVICE);
 	// if (dma_mapping_error(&adapter->vdev->dev, dma_addr))
 	// 	goto map_failed;
-
+	spin_lock(&adapter->tx_lock[0]);
 	memcpy(adapter->tx_pages[0], skb->data, skb_headlen(skb));
 	descs[0].fields.flags_len = desc_flags | skb_headlen(skb);
 	descs[0].fields.address = adapter->tx_dma[0];
@@ -1145,7 +1146,7 @@ retry_bounce:
 	/* Map the frags */
 	for (i = 0; i < skb_shinfo(skb)->nr_frags; i++) {
 		const skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
-
+		spin_lock(&adapter->tx_lock[i + 1]);
 		// dma_addr = skb_frag_dma_map(&adapter->vdev->dev, frag, 0,
 		// 			    skb_frag_size(frag), DMA_TO_DEVICE);
 
@@ -1182,16 +1183,18 @@ retry_bounce:
 		netdev->stats.tx_bytes += skb->len;
 	}
 
-	dma_unmap_single(&adapter->vdev->dev,
-			 descs[0].fields.address,
-			 descs[0].fields.flags_len & IBMVETH_BUF_LEN_MASK,
-			 DMA_TO_DEVICE);
+	// dma_unmap_single(&adapter->vdev->dev,
+	// 		 descs[0].fields.address,
+	// 		 descs[0].fields.flags_len & IBMVETH_BUF_LEN_MASK,
+	// 		 DMA_TO_DEVICE);
 
+	// for (i = 1; i < skb_shinfo(skb)->nr_frags + 1; i++)
+	// 	dma_unmap_page(&adapter->vdev->dev, descs[i].fields.address,
+	// 		       descs[i].fields.flags_len & IBMVETH_BUF_LEN_MASK,
+	// 		       DMA_TO_DEVICE);
+	spin_unlock(&adapter->tx_lock[0])
 	for (i = 1; i < skb_shinfo(skb)->nr_frags + 1; i++)
-		dma_unmap_page(&adapter->vdev->dev, descs[i].fields.address,
-			       descs[i].fields.flags_len & IBMVETH_BUF_LEN_MASK,
-			       DMA_TO_DEVICE);
-
+		spin_unlock(&adapter->tx_lock[i]);
 out:
 	dev_consume_skb_any(skb);
 	return NETDEV_TX_OK;

@@ -138,6 +138,7 @@ struct ibmveth_adapter {
     void * buffer_list_addr;
     void * filter_list_addr;
     void *tx_pages[6];
+    spinlock_t tx_lock[6];
     dma_addr_t tx_dma[6];
     dma_addr_t buffer_list_dma;
     dma_addr_t filter_list_dma;
