@@ -1055,7 +1055,7 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 	int force_bounce = 0;
 	dma_addr_t dma_addr;
 	unsigned long mss = 0;
-
+	unsigned long start = ktime_get_ns();
 	if (ibmveth_is_packet_unsupported(skb, netdev))
 		goto out;
 
@@ -1197,6 +1197,7 @@ retry_bounce:
 	//	spin_unlock(&adapter->tx_lock[i]);
 out:
 	dev_consume_skb_any(skb);
+	netdev_dbg(adapter->netdev, "xmit took %d\n", ktime_get_ns() - start);
 	return NETDEV_TX_OK;
 
 map_failed_frags:
