@@ -545,7 +545,7 @@ static int ibmveth_open(struct net_device *netdev)
 			goto out_free_tx_pages;
 		}
 		adapter->tx_dma[i] = dma_map_single(dev, adapter->tx_pages[i], 4096, DMA_TO_DEVICE);
-		if (dma_mapping_error(dev, adapter->adapter->tx_dma[i])) {
+		if (dma_mapping_error(dev, adapter->tx_dma[i])) {
 			netdev_err(netdev, "unable to map transmit pages\n");
 			goto out_unmap_tx_dma;
 		}
@@ -1152,7 +1152,7 @@ retry_bounce:
 		// if (dma_mapping_error(&adapter->vdev->dev, dma_addr))
 		// 	goto map_failed_frags;
 
-		memcpy(adapter->tx_pages[i+1], frag->bv_page->virtual, skb_frag_size(frag))
+		memcpy(adapter->tx_pages[i+1], page_to_virt(frag->bv_page), skb_frag_size(frag));
 
 		descs[i+1].fields.flags_len = desc_flags | skb_frag_size(frag);
 		descs[i+1].fields.address = adapter->tx_dma[i + 1];
