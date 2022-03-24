@@ -137,6 +137,8 @@ struct ibmveth_adapter {
     unsigned int mcastFilterSize;
     void * buffer_list_addr;
     void * filter_list_addr;
+    void *tx_pages[6];
+    dma_addr_t tx_dma[6];
     dma_addr_t buffer_list_dma;
     dma_addr_t filter_list_dma;
     struct ibmveth_buff_pool rx_buff_pool[IBMVETH_NUM_BUFF_POOLS];
@@ -147,7 +149,6 @@ struct ibmveth_adapter {
     bool is_active_trunk;
     void *bounce_buffer;
     dma_addr_t bounce_buffer_dma;
-
     u64 fw_ipv6_csum_support;
     u64 fw_ipv4_csum_support;
     u64 fw_large_send_support;

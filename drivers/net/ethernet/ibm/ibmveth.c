@@ -538,6 +538,20 @@ static int ibmveth_open(struct net_device *netdev)
 		goto out_unmap_buffer_list;
 	}
 
+	for (i = 0; i < 6; i++) {
+		adapter->tx_pages[i] = (void*) get_zeroed_page(GFP_KERNEL);
+		if (!adapter->tx_pages[i]) {
+			netdev_err(netdev, "unable to allocate transmit pages\n");
+			goto out_free_tx_pages;
+		}
+		adapter->tx_dma[i] = dma_map_single(dev, adapter->tx_pages[i], 4096, DMA_TO_DEVICE);
+		if (dma_mapping_error(dev, adapter->adapter->tx_dma[i])) {
+			netdev_err(netdev, "unable to map transmit pages\n");
+			goto out_unmap_tx_dma;
+		}
+	}
+
+
 	adapter->rx_queue.index = 0;
 	adapter->rx_queue.num_slots = rxq_entries;
 	adapter->rx_queue.toggle = 1;
@@ -623,6 +637,15 @@ out_free_buffer_pools:
 out_unmap_filter_list:
 	dma_unmap_single(dev, adapter->filter_list_dma, 4096,
 			 DMA_BIDIRECTIONAL);
+
+out_unmap_tx_dma:
+	free_page((unsigned long)adapter->tx_pages[i]);
+out_free_tx_pages:
+	while (--i >= 0) {
+		dma_unmap_single(dev, adapter->tx_pages[i], 4096, DMA_TO_DEVICE);
+		free_page((unsigned long)adapter->tx_pages[i]);
+	}
+
 out_unmap_buffer_list:
 	dma_unmap_single(dev, adapter->buffer_list_dma, 4096,
 			 DMA_BIDIRECTIONAL);
@@ -684,6 +707,11 @@ static int ibmveth_close(struct net_device *netdev)
 		if (adapter->rx_buff_pool[i].active)
 			ibmveth_free_buffer_pool(adapter,
 						 &adapter->rx_buff_pool[i]);
+	
+	for (i = 0; i < 6; i++) {
+		dma_unmap_single(dev, adapter->tx_pages[i], 4096, DMA_TO_DEVICE);
+		free_page((unsigned long)adapter->tx_pages[i]);
+	}
 
 	dma_free_coherent(&adapter->vdev->dev,
 			  adapter->netdev->mtu + IBMVETH_BUFF_OH,
@@ -1105,26 +1133,29 @@ retry_bounce:
 	}
 
 	/* Map the header */
-	dma_addr = dma_map_single(&adapter->vdev->dev, skb->data,
-				  skb_headlen(skb), DMA_TO_DEVICE);
-	if (dma_mapping_error(&adapter->vdev->dev, dma_addr))
-		goto map_failed;
+	// dma_addr = dma_map_single(&adapter->vdev->dev, skb->data,
+	// 			  skb_headlen(skb), DMA_TO_DEVICE);
+	// if (dma_mapping_error(&adapter->vdev->dev, dma_addr))
+	// 	goto map_failed;
 
+	memcpy(adapter->tx_pages[0], skb->data, skb_headlen(skb));
 	descs[0].fields.flags_len = desc_flags | skb_headlen(skb);
-	descs[0].fields.address = dma_addr;
+	descs[0].fields.address = adapter->tx_dma[0];
 
 	/* Map the frags */
 	for (i = 0; i < skb_shinfo(skb)->nr_frags; i++) {
 		const skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
 
-		dma_addr = skb_frag_dma_map(&adapter->vdev->dev, frag, 0,
-					    skb_frag_size(frag), DMA_TO_DEVICE);
+		// dma_addr = skb_frag_dma_map(&adapter->vdev->dev, frag, 0,
+		// 			    skb_frag_size(frag), DMA_TO_DEVICE);
 
-		if (dma_mapping_error(&adapter->vdev->dev, dma_addr))
-			goto map_failed_frags;
+		// if (dma_mapping_error(&adapter->vdev->dev, dma_addr))
+		// 	goto map_failed_frags;
+
+		memcpy(adapter->tx_pages[i+1], frag->bv_page->virtual, skb_frag_size(frag))
 
 		descs[i+1].fields.flags_len = desc_flags | skb_frag_size(frag);
-		descs[i+1].fields.address = dma_addr;
+		descs[i+1].fields.address = adapter->tx_dma[i + 1];
 	}
 
 	if (skb->ip_summed == CHECKSUM_PARTIAL && skb_is_gso(skb)) {
