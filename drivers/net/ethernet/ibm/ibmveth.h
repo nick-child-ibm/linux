@@ -130,6 +130,34 @@ struct ibmveth_rx_q {
     struct ibmveth_rx_q_entry *queue_addr;
 };
 
+/*
+ * We pass struct ibmveth_buf_desc_fields to the hypervisor in registers,
+ * so we don't need to byteswap the two elements. However since we use
+ * a union (ibmveth_buf_desc) to convert from the struct to a u64 we
+ * do end up with endian specific ordering of the elements and that
+ * needs correcting.
+ */
+struct ibmveth_buf_desc_fields {
+#ifdef __BIG_ENDIAN
+    u32 flags_len;
+    u32 address;
+#else
+    u32 address;
+    u32 flags_len;
+#endif
+#define IBMVETH_BUF_VALID   0x80000000
+#define IBMVETH_BUF_TOGGLE  0x40000000
+#define IBMVETH_BUF_LRG_SND     0x04000000
+#define IBMVETH_BUF_NO_CSUM 0x02000000
+#define IBMVETH_BUF_CSUM_GOOD   0x01000000
+#define IBMVETH_BUF_LEN_MASK    0x00FFFFFF
+};
+
+union ibmveth_buf_desc {
+    u64 desc;
+    struct ibmveth_buf_desc_fields fields;
+};
+
 struct ibmveth_adapter {
     struct vio_dev *vdev;
     struct net_device *netdev;
@@ -168,34 +196,6 @@ struct ibmveth_adapter {
     /* Ethtool settings */
 	u8 duplex;
 	u32 speed;
-};
-
-/*
- * We pass struct ibmveth_buf_desc_fields to the hypervisor in registers,
- * so we don't need to byteswap the two elements. However since we use
- * a union (ibmveth_buf_desc) to convert from the struct to a u64 we
- * do end up with endian specific ordering of the elements and that
- * needs correcting.
- */
-struct ibmveth_buf_desc_fields {
-#ifdef __BIG_ENDIAN
-	u32 flags_len;
-	u32 address;
-#else
-	u32 address;
-	u32 flags_len;
-#endif
-#define IBMVETH_BUF_VALID	0x80000000
-#define IBMVETH_BUF_TOGGLE	0x40000000
-#define IBMVETH_BUF_LRG_SND     0x04000000
-#define IBMVETH_BUF_NO_CSUM	0x02000000
-#define IBMVETH_BUF_CSUM_GOOD	0x01000000
-#define IBMVETH_BUF_LEN_MASK	0x00FFFFFF
-};
-
-union ibmveth_buf_desc {
-    u64 desc;
-    struct ibmveth_buf_desc_fields fields;
 };
 
 struct ibmveth_rx_q_entry {
