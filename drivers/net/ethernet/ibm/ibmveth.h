@@ -139,6 +139,7 @@ struct ibmveth_adapter {
     void * filter_list_addr;
     void * tx_pages[6];
     dma_addr_t tx_dma[6];
+    union ibmveth_buf_desc tx_descs[6];
     dma_addr_t buffer_list_dma;
     dma_addr_t filter_list_dma;
     struct ibmveth_buff_pool rx_buff_pool[IBMVETH_NUM_BUFF_POOLS];

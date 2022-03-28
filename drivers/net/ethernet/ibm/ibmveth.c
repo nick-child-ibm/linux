@@ -1050,8 +1050,8 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 				      struct net_device *netdev)
 {
 	struct ibmveth_adapter *adapter = netdev_priv(netdev);
+	union ibmveth_buf_desc *descs = adapter->tx_descs;
 	unsigned int desc_flags;
-	union ibmveth_buf_desc descs[6];
 	int i;
 	unsigned long mss = 0;
 
@@ -1105,8 +1105,6 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 			desc_flags |= IBMVETH_BUF_LRG_SND;
 	}
 
-	memset(descs, 0, sizeof(descs));
-
 	/*
 	 * If a linear packet is below the rx threshold then
 	 * copy it into the static bounce buffer. This avoids the
@@ -1118,7 +1116,7 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 
 		descs[0].fields.flags_len = desc_flags | skb->len;
 		descs[0].fields.address = adapter->bounce_buffer_dma;
-
+		memset(&descs[1], 0, sizeof(descs) - sizeof(descs[0]));
 		if (ibmveth_send(adapter, descs, 0)) {
 			adapter->tx_send_failed++;
 			netdev->stats.tx_dropped++;
@@ -1161,6 +1159,8 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 		descs[i+1].fields.flags_len = desc_flags | skb_frag_size(frag);
 		descs[i+1].fields.address = adapter->tx_dma[i + 1];
 	}
+	for (; i < 6; i++)
+		descs[i+1].desc = 0;
 
 	if (ibmveth_send(adapter, descs, mss)) {
 		adapter->tx_send_failed++;
