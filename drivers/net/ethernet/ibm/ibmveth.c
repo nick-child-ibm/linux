@@ -1051,9 +1051,7 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 	struct ibmveth_adapter *adapter = netdev_priv(netdev);
 	unsigned int desc_flags;
 	union ibmveth_buf_desc descs[6];
-	int last, i;
-	int force_bounce = 0;
-	dma_addr_t dma_addr;
+	int i;
 	unsigned long mss = 0;
 	if (ibmveth_is_packet_unsupported(skb, netdev))
 		goto out;
@@ -1105,7 +1103,6 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 			desc_flags |= IBMVETH_BUF_LRG_SND;
 	}
 
-retry_bounce:
 	memset(descs, 0, sizeof(descs));
 
 	/*
@@ -1113,8 +1110,7 @@ retry_bounce:
 	 * copy it into the static bounce buffer. This avoids the
 	 * cost of a TCE insert and remove.
 	 */
-	if (force_bounce || (!skb_is_nonlinear(skb) &&
-				(skb->len < tx_copybreak))) {
+	if (!skb_is_nonlinear(skb) && (skb->len < tx_copybreak)) {
 		skb_copy_from_linear_data(skb, adapter->bounce_buffer,
 					  skb->len);
 
@@ -1130,6 +1126,22 @@ retry_bounce:
 		}
 
 		goto out;
+	}
+
+	if (skb->ip_summed == CHECKSUM_PARTIAL && skb_is_gso(skb)) {
+		if (adapter->fw_large_send_support) {
+			mss = (unsigned long)skb_shinfo(skb)->gso_size;
+			adapter->tx_large_packets++;
+		} else if (!skb_is_gso_v6(skb)) {
+			/* Put -1 in the IP checksum to tell phyp it
+			 * is a largesend packet. Put the mss in
+			 * the TCP checksum.
+			 */
+			ip_hdr(skb)->check = 0xffff;
+			tcp_hdr(skb)->check =
+				cpu_to_be16(skb_shinfo(skb)->gso_size);
+			adapter->tx_large_packets++;
+		}
 	}
 
 	/* Map the header */
@@ -1158,22 +1170,6 @@ retry_bounce:
 
 		descs[i+1].fields.flags_len = desc_flags | skb_frag_size(frag);
 		descs[i+1].fields.address = adapter->tx_dma[i + 1];
-	}
-
-	if (skb->ip_summed == CHECKSUM_PARTIAL && skb_is_gso(skb)) {
-		if (adapter->fw_large_send_support) {
-			mss = (unsigned long)skb_shinfo(skb)->gso_size;
-			adapter->tx_large_packets++;
-		} else if (!skb_is_gso_v6(skb)) {
-			/* Put -1 in the IP checksum to tell phyp it
-			 * is a largesend packet. Put the mss in
-			 * the TCP checksum.
-			 */
-			ip_hdr(skb)->check = 0xffff;
-			tcp_hdr(skb)->check =
-				cpu_to_be16(skb_shinfo(skb)->gso_size);
-			adapter->tx_large_packets++;
-		}
 	}
 
 	if (ibmveth_send(adapter, descs, mss)) {
