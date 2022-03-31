@@ -1346,7 +1346,7 @@ static int ibmveth_poll(struct napi_struct *napi, int budget)
 			}
 
 			new_skb = NULL;
-			if (length < rx_copybreak)
+			//if (length < rx_copybreak)
 				new_skb = netdev_alloc_skb(netdev, length);
 
 			if (new_skb) {
