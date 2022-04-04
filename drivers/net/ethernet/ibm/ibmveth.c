@@ -538,16 +538,16 @@ static int ibmveth_open(struct net_device *netdev)
 		goto out_unmap_buffer_list;
 	}
 
-	for (i = 0; i < 6; i++) {
-		adapter->tx_pages[i] =
+	for (i = 0; i < IBMVETH_MAX_FRAGS_TO_FW; i++) {
+		adapter->tx_ptrs[i] =
 			(void *)kcalloc(1, IBMVETH_MAX_BUF_SIZE, GFP_KERNEL);
-		if (!adapter->tx_pages[i]) {
+		if (!adapter->tx_ptrs[i]) {
 			netdev_err(netdev,
 				   "unable to allocate transmit pages\n");
-			goto out_free_tx_pages;
+			goto out_free_tx_ptrs;
 		}
 		adapter->tx_dma[i] =
-			dma_map_single(dev, adapter->tx_pages[i],
+			dma_map_single(dev, adapter->tx_ptrs[i],
 				       IBMVETH_MAX_BUF_SIZE, DMA_TO_DEVICE);
 		if (dma_mapping_error(dev, adapter->tx_dma[i])) {
 			netdev_err(netdev, "unable to map transmit pages\n");
@@ -642,12 +642,12 @@ out_unmap_filter_list:
 			 DMA_BIDIRECTIONAL);
 
 out_unmap_tx_dma:
-	kfree(adapter->tx_pages[i]);
-out_free_tx_pages:
+	kfree(adapter->tx_ptrs[i]);
+out_free_tx_ptrs:
 	while (--i >= 0) {
 		dma_unmap_single(dev, adapter->tx_dma[i], IBMVETH_MAX_BUF_SIZE,
 				 DMA_TO_DEVICE);
-		kfree(adapter->tx_pages[i]);
+		kfree(adapter->tx_ptrs[i]);
 	}
 
 out_unmap_buffer_list:
@@ -712,10 +712,10 @@ static int ibmveth_close(struct net_device *netdev)
 			ibmveth_free_buffer_pool(adapter,
 						 &adapter->rx_buff_pool[i]);
 
-	for (i = 0; i < 6; i++) {
+	for (i = 0; i < IBMVETH_MAX_FRAGS_TO_FW; i++) {
 		dma_unmap_single(dev, adapter->tx_dma[i], IBMVETH_MAX_BUF_SIZE,
 				 DMA_TO_DEVICE);
-		kfree(adapter->tx_pages[i]);
+		kfree(adapter->tx_ptrs[i]);
 	}
 
 	dma_free_coherent(&adapter->vdev->dev,
@@ -1054,7 +1054,7 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 {
 	struct ibmveth_adapter *adapter = netdev_priv(netdev);
 	unsigned int desc_flags;
-	union ibmveth_buf_desc descs[6];
+	union ibmveth_buf_desc descs[IBMVETH_MAX_FRAGS_TO_FW];
 	int i;
 	unsigned long mss = 0;
 
@@ -1071,10 +1071,12 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 	}
 
 	/*
-	 * veth handles a maximum of 6 segments including the header, so
-	 * we have to linearize the skb if there are more than this.
+	 * veth handles a maximum of IBMVETH_MAX_FRAGS_TO_FW segments 
+	 * including the header, so we have to linearize the skb if there 
+	 * are more than this.
 	 */
-	if (skb_shinfo(skb)->nr_frags > 5 && __skb_linearize(skb)) {
+	if (skb_shinfo(skb)->nr_frags > IBMVETH_MAX_FRAGS_TO_FW - 1 &&
+	    __skb_linearize(skb)) {
 		netdev->stats.tx_dropped++;
 		goto out;
 	}
@@ -1151,7 +1153,7 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 
 	/* Copy header into mapped buffer */
 	BUG_ON(skb_headlen(skb) > IBMVETH_MAX_BUF_SIZE);
-	memcpy(adapter->tx_pages[0], skb->data, skb_headlen(skb));
+	memcpy(adapter->tx_ptrs[0], skb->data, skb_headlen(skb));
 	descs[0].fields.flags_len = desc_flags | skb_headlen(skb);
 	descs[0].fields.address = adapter->tx_dma[0];
 
@@ -1159,7 +1161,7 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 	for (i = 0; i < skb_shinfo(skb)->nr_frags; i++) {
 		const skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
 		BUG_ON(skb_frag_size(frag) > IBMVETH_MAX_BUF_SIZE);
-		memcpy(adapter->tx_pages[i + 1], skb_frag_address_safe(frag),
+		memcpy(adapter->tx_ptrs[i + 1], skb_frag_address_safe(frag),
 		       skb_frag_size(frag));
 		descs[i + 1].fields.flags_len =
 			desc_flags | skb_frag_size(frag);
@@ -1562,7 +1564,8 @@ static unsigned long ibmveth_get_desired_dma(struct vio_dev *vdev)
 	ret = IBMVETH_BUFF_LIST_SIZE + IBMVETH_FILT_LIST_SIZE;
 	ret += IOMMU_PAGE_ALIGN(netdev->mtu, tbl);
 	/* add size of mapped tx buffers */
-	ret += 6 * IOMMU_PAGE_ALIGN(IBMVETH_MAX_BUF_SIZE, tbl);
+	ret += IBMVETH_MAX_FRAGS_TO_FW *
+	       IOMMU_PAGE_ALIGN(IBMVETH_MAX_BUF_SIZE, tbl);
 
 	for (i = 0; i < IBMVETH_NUM_BUFF_POOLS; i++) {
 		/* add the size of the active receive buffers */
