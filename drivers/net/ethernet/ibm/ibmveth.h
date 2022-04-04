@@ -46,6 +46,11 @@
 #define h_add_logical_lan_buffer(ua, buf) \
   plpar_hcall_norets(H_ADD_LOGICAL_LAN_BUFFER, ua, buf)
 
+/*
+ * plpar_hcall9 can take 9 arguments, since we need to use 3 we
+ * can use the remaing 6 to store skb segments. This value is 
+ * reflected in IBMVETH_MAX_FRAGS_TO_FW.
+ */
 static inline long h_send_logical_lan(unsigned long unit_address,
 		unsigned long desc1, unsigned long desc2, unsigned long desc3,
 		unsigned long desc4, unsigned long desc5, unsigned long desc6,
@@ -98,6 +103,7 @@ static inline long h_illan_attributes(unsigned long unit_address,
 #define IBMVETH_BUFF_LIST_SIZE 4096
 #define IBMVETH_FILT_LIST_SIZE 4096
 #define IBMVETH_MAX_BUF_SIZE (1024 * 128)
+#define IBMVETH_MAX_FRAGS_TO_FW 6 /* maximum buffers we can give to FW on xmit */ 
 
 static int pool_size[] = { 512, 1024 * 2, 1024 * 16, 1024 * 32, 1024 * 64 };
 static int pool_count[] = { 256, 512, 256, 256, 256 };
@@ -137,8 +143,8 @@ struct ibmveth_adapter {
     unsigned int mcastFilterSize;
     void * buffer_list_addr;
     void * filter_list_addr;
-    void * tx_pages[6];
-    dma_addr_t tx_dma[6];
+    void * tx_ptrs[IBMVETH_MAX_FRAGS_TO_FW];
+    dma_addr_t tx_dma[IBMVETH_MAX_FRAGS_TO_FW];
     dma_addr_t buffer_list_dma;
     dma_addr_t filter_list_dma;
     struct ibmveth_buff_pool rx_buff_pool[IBMVETH_NUM_BUFF_POOLS];
