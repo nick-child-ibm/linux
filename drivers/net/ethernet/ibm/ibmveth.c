@@ -226,12 +226,12 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 		index = pool->free_map[free_index];
 
 		BUG_ON(index == IBM_VETH_INVALID_MAP);
-		/* both dma/skb must be either set or not (XNOR) */
-		BUG_ON((pool->skbuff[index] == NULL) != (pool->dma_addr[index] == NULL))
+		
 
 		/* if pool->skbuff[index] is not null then we can recycle the buffer */
 		if (pool->skbuff[index] != NULL) {
-
+			skb = pool->skbuff[index];
+			dma_addr = pool->dma_addr[index];
 		}
 		else {
 			skb = netdev_alloc_skb(adapter->netdev, pool->buff_size);
