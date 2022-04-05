@@ -200,12 +200,14 @@ static inline void ibmveth_flush_buffer(void *addr, unsigned long length)
 		asm("dcbfl %0,%1" :: "b" (addr), "r" (offset));
 }
 
+static void ibmveth_remove_buffer_from_pool(struct ibmveth_adapter *adapter,
+					    u64 correlator);
 static void reuse_skb(struct sk_buff *skb) {
 	struct ibmveth_adapter *adapter = netdev_priv(skb->dev);
 	u64 correlator = skb->cb[40];
 	
 	BUG_ON(correlator >> 32 > IBMVETH_NUM_BUFF_POOLS);
-	BUG_ON(correlator & 0xffffffffUL > adapter->rx_buff_pool[correlator >> 32].size);
+	BUG_ON((correlator & 0xffffffffUL) > adapter->rx_buff_pool[correlator >> 32].size);
 
 	ibmveth_remove_buffer_from_pool(adapter, correlator);
 
