@@ -219,15 +219,6 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 	for (i = 0; i < count; ++i) {
 		union ibmveth_buf_desc desc;
 
-		skb = netdev_alloc_skb(adapter->netdev, pool->buff_size);
-
-		if (!skb) {
-			netdev_dbg(adapter->netdev,
-				   "replenish: unable to allocate skb\n");
-			adapter->replenish_no_mem++;
-			break;
-		}
-
 		free_index = pool->consumer_index;
 		pool->consumer_index++;
 		if (pool->consumer_index >= pool->size)
@@ -235,17 +226,34 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 		index = pool->free_map[free_index];
 
 		BUG_ON(index == IBM_VETH_INVALID_MAP);
-		BUG_ON(pool->skbuff[index] != NULL);
+		/* both dma/skb must be either set or not (XNOR) */
+		BUG_ON((pool->skbuff[index] == NULL) != (pool->dma_addr[index] == NULL))
 
-		dma_addr = dma_map_single(&adapter->vdev->dev, skb->data,
-				pool->buff_size, DMA_FROM_DEVICE);
+		/* if pool->skbuff[index] is not null then we can recycle the buffer */
+		if (pool->skbuff[index] != NULL) {
 
-		if (dma_mapping_error(&adapter->vdev->dev, dma_addr))
-			goto failure;
+		}
+		else {
+			skb = netdev_alloc_skb(adapter->netdev, pool->buff_size);
+
+			if (!skb) {
+				netdev_dbg(adapter->netdev,
+					   "replenish: unable to allocate skb\n");
+				adapter->replenish_no_mem++;
+				break;
+			}
+
+
+			dma_addr = dma_map_single(&adapter->vdev->dev, skb->data,
+					pool->buff_size, DMA_FROM_DEVICE);
+
+			if (dma_mapping_error(&adapter->vdev->dev, dma_addr))
+				goto failure;
+			pool->dma_addr[index] = dma_addr;
+			pool->skbuff[index] = skb;
+		}
 
 		pool->free_map[free_index] = IBM_VETH_INVALID_MAP;
-		pool->dma_addr[index] = dma_addr;
-		pool->skbuff[index] = skb;
 
 		correlator = ((u64)pool->index << 32) | index;
 		*(u64 *)skb->data = correlator;
@@ -372,12 +380,12 @@ static void ibmveth_remove_buffer_from_pool(struct ibmveth_adapter *adapter,
 
 	BUG_ON(skb == NULL);
 
-	adapter->rx_buff_pool[pool].skbuff[index] = NULL;
+	// adapter->rx_buff_pool[pool].skbuff[index] = NULL;
 
-	dma_unmap_single(&adapter->vdev->dev,
-			 adapter->rx_buff_pool[pool].dma_addr[index],
-			 adapter->rx_buff_pool[pool].buff_size,
-			 DMA_FROM_DEVICE);
+	// dma_unmap_single(&adapter->vdev->dev,
+	// 		 adapter->rx_buff_pool[pool].dma_addr[index],
+	// 		 adapter->rx_buff_pool[pool].buff_size,
+	// 		 DMA_FROM_DEVICE);
 
 	free_index = adapter->rx_buff_pool[pool].producer_index;
 	adapter->rx_buff_pool[pool].producer_index++;
