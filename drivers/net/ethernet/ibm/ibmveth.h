@@ -111,7 +111,8 @@ struct ibmveth_buff_pool {
     u32 index;
     u32 buff_size;
     u32 threshold;
-    atomic_t available;
+    atomic_t in_fw;
+    atomic_t in_netstack;
     u32 consumer_index;
     u32 producer_index;
     u16 *free_map;

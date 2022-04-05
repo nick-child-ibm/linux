@@ -184,7 +184,8 @@ static int ibmveth_alloc_buffer_pool(struct ibmveth_buff_pool *pool)
 	for (i = 0; i < pool->size; ++i)
 		pool->free_map[i] = i;
 
-	atomic_set(&pool->available, 0);
+	atomic_set(&pool->in_fw, 0);
+	atomic_set(&pool->in_netstack, 0)
 	pool->producer_index = 0;
 	pool->consumer_index = 0;
 
@@ -206,7 +207,7 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 					  struct ibmveth_buff_pool *pool)
 {
 	u32 i;
-	u32 count = pool->size - atomic_read(&pool->available);
+	u32 count = pool->size - (atomic_read(&pool->in_fw) + atomic_read(&pool->in_netstack));
 	u32 buffers_added = 0;
 	struct sk_buff *skb;
 	unsigned int free_index, index;
@@ -279,7 +280,7 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 	}
 
 	mb();
-	atomic_add(buffers_added, &(pool->available));
+	atomic_add(buffers_added, &(pool->in_fw));
 	return;
 
 failure:
@@ -297,7 +298,7 @@ failure:
 	adapter->replenish_add_buff_failure++;
 
 	mb();
-	atomic_add(buffers_added, &(pool->available));
+	atomic_add(buffers_added, &(pool->in_fw));
 }
 
 /*
@@ -323,7 +324,7 @@ static void ibmveth_replenish_task(struct ibmveth_adapter *adapter)
 		struct ibmveth_buff_pool *pool = &adapter->rx_buff_pool[i];
 
 		if (pool->active &&
-		    (atomic_read(&pool->available) < pool->threshold))
+		    (atomic_read(&pool->in_fw) + atomic_read(&pool->in_netstack) < pool->threshold))
 			ibmveth_replenish_buffer_pool(adapter, pool);
 	}
 
@@ -396,7 +397,7 @@ static void ibmveth_remove_buffer_from_pool(struct ibmveth_adapter *adapter,
 
 	mb();
 
-	atomic_dec(&(adapter->rx_buff_pool[pool].available));
+	atomic_dec(&(adapter->rx_buff_pool[pool].in_netstack));
 }
 
 /* get the current buffer on the rx queue */
@@ -456,7 +457,9 @@ out:
 
 static void ibmveth_rxq_harvest_buffer(struct ibmveth_adapter *adapter)
 {
-	ibmveth_remove_buffer_from_pool(adapter, adapter->rx_queue.queue_addr[adapter->rx_queue.index].correlator);
+	//ibmveth_remove_buffer_from_pool(adapter, adapter->rx_queue.queue_addr[adapter->rx_queue.index].correlator);
+	atomic_inc(&(adapter->rx_buff_pool[pool].in_netstack));
+	atomic_dec(&(adapter->rx_buff_pool[pool].available));
 
 	if (++adapter->rx_queue.index == adapter->rx_queue.num_slots) {
 		adapter->rx_queue.index = 0;
