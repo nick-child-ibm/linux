@@ -200,6 +200,17 @@ static inline void ibmveth_flush_buffer(void *addr, unsigned long length)
 		asm("dcbfl %0,%1" :: "b" (addr), "r" (offset));
 }
 
+static void reuse_skb(struct sk_buff *skb) {
+	struct ibmveth_adapter *adapter = netdev_priv(skb->dev);
+	u64 correlator = skb->cb[40];
+	
+	BUG_ON(correlator >> 32 > IBMVETH_NUM_BUFF_POOLS);
+	BUG_ON(correlator & 0xffffffffUL > adapter->rx_buff_pool[correlator >> 32].size);
+
+	ibmveth_remove_buffer_from_pool(adapter, correlator);
+
+}
+
 /* replenish the buffers for a pool.  note that we don't need to
  * skb_reserve these since they are used for incoming...
  */
@@ -261,6 +272,9 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 
 		desc.fields.flags_len = IBMVETH_BUF_VALID | pool->buff_size;
 		desc.fields.address = dma_addr;
+
+		skb->destructor = reuse_skb;
+		skb->cb[40] = correlator;
 
 		if (rx_flush) {
 			unsigned int len = min(pool->buff_size,
