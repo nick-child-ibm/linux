@@ -39,7 +39,7 @@
 #include "ibmveth.h"
 
 static irqreturn_t ibmveth_interrupt(int irq, void *dev_instance);
-static void ibmveth_rxq_harvest_buffer(struct ibmveth_adapter *adapter);
+static void ibmveth_rxq_harvest_buffer(struct ibmveth_adapter *adapter, unsigned int pool);
 static unsigned long ibmveth_get_desired_dma(struct vio_dev *vdev);
 
 static struct kobj_type ktype_veth_pool;
@@ -1387,7 +1387,7 @@ static int ibmveth_poll(struct napi_struct *napi, int budget)
 					kfree_skb(skb);
 				skb = new_skb;
 			} else {
-				ibmveth_rxq_harvest_buffer(adapter, (unsigned int)skb->c[40]);
+				ibmveth_rxq_harvest_buffer(adapter, (unsigned int)skb->cb[40]);
 				skb_reserve(skb, offset);
 			}
 
