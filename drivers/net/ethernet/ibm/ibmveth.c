@@ -185,7 +185,7 @@ static int ibmveth_alloc_buffer_pool(struct ibmveth_buff_pool *pool)
 		pool->free_map[i] = i;
 
 	atomic_set(&pool->in_fw, 0);
-	atomic_set(&pool->in_netstack, 0)
+	atomic_set(&pool->in_netstack, 0);
 	pool->producer_index = 0;
 	pool->consumer_index = 0;
 
@@ -444,7 +444,7 @@ static int ibmveth_rxq_recycle_buffer(struct ibmveth_adapter *adapter)
 	BUG_ON(index >= adapter->rx_buff_pool[pool].size);
 
 	if (!adapter->rx_buff_pool[pool].active) {
-		ibmveth_rxq_harvest_buffer(adapter);
+		ibmveth_rxq_harvest_buffer(adapter, pool);
 		ibmveth_free_buffer_pool(adapter, &adapter->rx_buff_pool[pool]);
 		goto out;
 	}
@@ -471,7 +471,7 @@ out:
 	return ret;
 }
 
-static void ibmveth_rxq_harvest_buffer(struct ibmveth_adapter *adapter)
+static void ibmveth_rxq_harvest_buffer(struct ibmveth_adapter *adapter, unsigned int pool)
 {
 	//ibmveth_remove_buffer_from_pool(adapter, adapter->rx_queue.queue_addr[adapter->rx_queue.index].correlator);
 	atomic_inc(&(adapter->rx_buff_pool[pool].in_netstack));
@@ -1387,7 +1387,7 @@ static int ibmveth_poll(struct napi_struct *napi, int budget)
 					kfree_skb(skb);
 				skb = new_skb;
 			} else {
-				ibmveth_rxq_harvest_buffer(adapter);
+				ibmveth_rxq_harvest_buffer(adapter, &skb->c[40]);
 				skb_reserve(skb, offset);
 			}
 
