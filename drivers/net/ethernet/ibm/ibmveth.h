@@ -105,7 +105,10 @@ static int pool_count_cmo[] = { 256, 512, 256, 256, 64 };
 static int pool_active[] = { 1, 1, 0, 0, 1};
 
 #define IBM_VETH_INVALID_MAP ((u16)0xffff)
-
+struct rx_dma_map {
+    dma_addr_t dma_addr;
+    u8 addr;
+}
 struct ibmveth_buff_pool {
     u32 size;
     u32 index;
@@ -116,7 +119,7 @@ struct ibmveth_buff_pool {
     u32 consumer_index;
     u32 producer_index;
     u16 *free_map;
-    dma_addr_t *dma_addr;
+    struct rx_dma_map *dma_map;
     struct sk_buff **skbuff;
     int active;
     struct kobject kobj;

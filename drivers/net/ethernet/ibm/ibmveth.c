@@ -163,8 +163,8 @@ static int ibmveth_alloc_buffer_pool(struct ibmveth_buff_pool *pool)
 	if (!pool->free_map)
 		return -1;
 
-	pool->dma_addr = kcalloc(pool->size, sizeof(dma_addr_t), GFP_KERNEL);
-	if (!pool->dma_addr) {
+	pool->dma_map = kcalloc(pool->size, sizeof(struct rx_dma_map), GFP_KERNEL);
+	if (!pool->dma_map) {
 		kfree(pool->free_map);
 		pool->free_map = NULL;
 		return -1;
@@ -173,8 +173,8 @@ static int ibmveth_alloc_buffer_pool(struct ibmveth_buff_pool *pool)
 	pool->skbuff = kcalloc(pool->size, sizeof(void *), GFP_KERNEL);
 
 	if (!pool->skbuff) {
-		kfree(pool->dma_addr);
-		pool->dma_addr = NULL;
+		kfree(pool->dma_map);
+		pool->dma_map = NULL;
 
 		kfree(pool->free_map);
 		pool->free_map = NULL;
@@ -245,11 +245,11 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 		/* if pool->skbuff[index] is not null then we can recycle the buffer */
 		if (pool->skbuff[index] != NULL) {
 			skb = pool->skbuff[index];
-			dma_addr = pool->dma_addr[index];
+			dma_addr = pool->dma_map[index].dma_addr;
 
 			// this is the hard part
 			// we need to turn a full skb into the output of netdev_alloc_skb(adapter->netdev, pool->buff_size);
-			skb = napi_build_skb(skb, skb->head_frag ? skb->truesize : 0);
+			skb = napi_build_skb(pool->dma_map[index].addr, skb->head_frag ? skb->truesize : 0);
 			skb_reserve(skb, NET_SKB_PAD);
 			netdev_dbg(adapter->netdev, "to fw: %llu\n", ((u64)pool->index << 32) | index);
 		}
@@ -269,8 +269,10 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 
 			if (dma_mapping_error(&adapter->vdev->dev, dma_addr))
 				goto failure;
-			pool->dma_addr[index] = dma_addr;
+			pool->dma_map[index].dma_addr = dma_addr;
+			pool->dma_map[index].addr = skb->data;
 			pool->skbuff[index] = skb;
+
 		}
 
 		pool->free_map[free_index] = IBM_VETH_INVALID_MAP;
@@ -315,7 +317,7 @@ failure:
 		pool->consumer_index--;
 	if (!dma_mapping_error(&adapter->vdev->dev, dma_addr))
 		dma_unmap_single(&adapter->vdev->dev,
-		                 pool->dma_addr[index], pool->buff_size,
+		                 pool->dma_map[index].dma_addr, pool->buff_size,
 		                 DMA_FROM_DEVICE);
 	dev_kfree_skb_any(skb);
 	adapter->replenish_add_buff_failure++;
@@ -363,12 +365,12 @@ static void ibmveth_free_buffer_pool(struct ibmveth_adapter *adapter,
 	kfree(pool->free_map);
 	pool->free_map = NULL;
 
-	if (pool->skbuff && pool->dma_addr) {
+	if (pool->skbuff && pool->dma_map) {
 		for (i = 0; i < pool->size; ++i) {
 			struct sk_buff *skb = pool->skbuff[i];
 			if (skb) {
 				dma_unmap_single(&adapter->vdev->dev,
-						 pool->dma_addr[i],
+						 pool->dma_map[i].dma_addr,
 						 pool->buff_size,
 						 DMA_FROM_DEVICE);
 				dev_kfree_skb_any(skb);
@@ -377,9 +379,9 @@ static void ibmveth_free_buffer_pool(struct ibmveth_adapter *adapter,
 		}
 	}
 
-	if (pool->dma_addr) {
-		kfree(pool->dma_addr);
-		pool->dma_addr = NULL;
+	if (pool->dma_map) {
+		kfree(pool->dma_map);
+		pool->dma_map = NULL;
 	}
 
 	if (pool->skbuff) {
@@ -459,7 +461,7 @@ static int ibmveth_rxq_recycle_buffer(struct ibmveth_adapter *adapter)
 
 	desc.fields.flags_len = IBMVETH_BUF_VALID |
 		adapter->rx_buff_pool[pool].buff_size;
-	desc.fields.address = adapter->rx_buff_pool[pool].dma_addr[index];
+	desc.fields.address = adapter->rx_buff_pool[pool].dma_map[index].dma_addr;
 
 	lpar_rc = h_add_logical_lan_buffer(adapter->vdev->unit_address, desc.desc);
 
