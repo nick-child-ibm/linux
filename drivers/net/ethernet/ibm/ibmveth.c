@@ -206,7 +206,7 @@ static void reuse_skb(struct sk_buff *skb) {
 	struct ibmveth_adapter *adapter = netdev_priv(skb->dev);
 	u64 correlator = *(u64 *)&skb->cb[40];
 	
-	BUG_ON(correlator >> 32 > IBMVETH_NUM_BUFF_POOLS);
+	BUG_ON((correlator >> 32) > IBMVETH_NUM_BUFF_POOLS);
 	BUG_ON((correlator & 0xffffffffUL) > adapter->rx_buff_pool[correlator >> 32].size);
 	netdev_dbg(adapter->netdev, "to unalloc: %llu\n", correlator);
 	ibmveth_remove_buffer_from_pool(adapter, correlator);
@@ -273,7 +273,7 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 			pool->dma_map[index].addr = skb->data;
 		}
 		pool->skbuff[index] = skb;
-		
+
 		pool->free_map[free_index] = IBM_VETH_INVALID_MAP;
 
 		correlator = ((u64)pool->index << 32) | index;
