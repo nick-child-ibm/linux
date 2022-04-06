@@ -208,7 +208,7 @@ static void reuse_skb(struct sk_buff *skb) {
 	
 	BUG_ON(correlator >> 32 > IBMVETH_NUM_BUFF_POOLS);
 	BUG_ON((correlator & 0xffffffffUL) > adapter->rx_buff_pool[correlator >> 32].size);
-	netdev_dbg(pool->netdev, "to unalloc: %lu\n", ((u64)pool->index << 32) | index);
+	netdev_dbg(adapter->netdev, "to unalloc: %lu\n", ((u64)pool->index << 32) | index);
 	ibmveth_remove_buffer_from_pool(adapter, correlator);
 
 }
@@ -251,7 +251,7 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 			// we need to turn a full skb into the output of netdev_alloc_skb(adapter->netdev, pool->buff_size);
 			skb = napi_build_skb(skb, skb->truesize);
 			skb_reserve(skb, NET_SKB_PAD);
-			netdev_dbg(pool->netdev, "to fw: %lu\n", ((u64)pool->index << 32) | index);
+			netdev_dbg(adapter->netdev, "to fw: %lu\n", ((u64)pool->index << 32) | index);
 		}
 		else {
 			skb = netdev_alloc_skb(adapter->netdev, pool->buff_size);
@@ -1397,7 +1397,7 @@ static int ibmveth_poll(struct napi_struct *napi, int budget)
 				ibmveth_rxq_harvest_buffer(adapter, (unsigned int)skb->cb[40]);
 				skb_reserve(skb, offset);
 			}
-			netdev_dbg(pool->netdev, "to netstack: %lu\n", (u64)skb->cb[40]);
+			netdev_dbg(adapter->netdev, "to netstack: %lu\n", (u64)skb->cb[40]);
 			skb_put(skb, length);
 			skb->protocol = eth_type_trans(skb, netdev);
 
