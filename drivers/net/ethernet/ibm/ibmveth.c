@@ -204,7 +204,7 @@ static void ibmveth_remove_buffer_from_pool(struct ibmveth_adapter *adapter,
 					    u64 correlator);
 static void reuse_skb(struct sk_buff *skb) {
 	struct ibmveth_adapter *adapter = netdev_priv(skb->dev);
-	u64 correlator = (u64)skb->cb[40];
+	u64 correlator = *(u64 *)&skb->cb[40];
 	
 	BUG_ON(correlator >> 32 > IBMVETH_NUM_BUFF_POOLS);
 	BUG_ON((correlator & 0xffffffffUL) > adapter->rx_buff_pool[correlator >> 32].size);
@@ -282,7 +282,7 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 		desc.fields.address = dma_addr;
 
 		skb->destructor = reuse_skb; //when skb is freed, use this function
-		skb->cb[40] = correlator; // store the pool/index for destructor
+		*(u64 *)&skb->cb[40] = correlator; // store the pool/index for destructor
 		skb->pp_recycle = 1; // tell skb_free to not free data
 
 		if (rx_flush) {
@@ -1394,10 +1394,10 @@ static int ibmveth_poll(struct napi_struct *napi, int budget)
 					kfree_skb(skb);
 				skb = new_skb;
 			} else {
-				ibmveth_rxq_harvest_buffer(adapter, (unsigned int)skb->cb[40]);
+				ibmveth_rxq_harvest_buffer(adapter, *(u64 *)&skb->cb[40]);
 				skb_reserve(skb, offset);
 			}
-			netdev_dbg(adapter->netdev, "to netstack: %llu\n", (u64)skb->cb[40]);
+			netdev_dbg(adapter->netdev, "to netstack: %llu\n", *(u64 *)&skb->cb[40]);
 			skb_put(skb, length);
 			skb->protocol = eth_type_trans(skb, netdev);
 
