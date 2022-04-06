@@ -246,6 +246,11 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 		if (pool->skbuff[index] != NULL) {
 			skb = pool->skbuff[index];
 			dma_addr = pool->dma_addr[index];
+
+			// this is the hard part
+			// we need to turn a full skb into the output of netdev_alloc_skb(adapter->netdev, pool->buff_size);
+			skb = napi_build_skb(skb, skb->truesize);
+			skb_reserve(skb, NET_SKB_PAD);
 		}
 		else {
 			skb = netdev_alloc_skb(adapter->netdev, pool->buff_size);
@@ -275,8 +280,9 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 		desc.fields.flags_len = IBMVETH_BUF_VALID | pool->buff_size;
 		desc.fields.address = dma_addr;
 
-		skb->destructor = reuse_skb;
-		skb->cb[40] = correlator;
+		skb->destructor = reuse_skb; //when skb is freed, use this function
+		skb->cb[40] = correlator; // store the pool/index for destructor
+		skb->pp_recycle = 1; // tell skb_free to not free data
 
 		if (rx_flush) {
 			unsigned int len = min(pool->buff_size,
