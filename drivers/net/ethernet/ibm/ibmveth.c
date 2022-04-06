@@ -1382,24 +1382,24 @@ static int ibmveth_poll(struct napi_struct *napi, int budget)
 				mss = (u16)be64_to_cpu(*rxmss);
 			}
 
-			new_skb = NULL;
-			if (length < rx_copybreak)
-				new_skb = netdev_alloc_skb(netdev, length);
+			// new_skb = NULL;
+			// if (length < rx_copybreak)
+			// 	new_skb = netdev_alloc_skb(netdev, length);
 
-			if (new_skb) {
-				skb_copy_to_linear_data(new_skb,
-							skb->data + offset,
-							length);
-				if (rx_flush)
-					ibmveth_flush_buffer(skb->data,
-						length + offset);
-				if (!ibmveth_rxq_recycle_buffer(adapter))
-					kfree_skb(skb);
-				skb = new_skb;
-			} else {
-				ibmveth_rxq_harvest_buffer(adapter, *(u64 *)&skb->cb[40]);
-				skb_reserve(skb, offset);
-			}
+			// if (new_skb) {
+			// 	skb_copy_to_linear_data(new_skb,
+			// 				skb->data + offset,
+			// 				length);
+			// 	if (rx_flush)
+			// 		ibmveth_flush_buffer(skb->data,
+			// 			length + offset);
+			// 	if (!ibmveth_rxq_recycle_buffer(adapter))
+			// 		kfree_skb(skb);
+			// 	skb = new_skb;
+			// } else {
+			 	ibmveth_rxq_harvest_buffer(adapter, *(u64 *)&skb->cb[40]);
+			 	skb_reserve(skb, offset);
+			// }
 			spin_lock(&adapter->lock);
 			netdev_dbg(adapter->netdev, "to netstack: %llu\n", *(u64 *)&skb->cb[40]);
 			spin_unlock(&adapter->lock);
