@@ -250,7 +250,7 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 			// this is the hard part
 			// we need to turn a full skb into the output of netdev_alloc_skb(adapter->netdev, pool->buff_size);
 			skb = napi_build_skb(pool->dma_map[index].addr, skb->head_frag ? skb->truesize : 0);
-			skb_reserve(skb, NET_SKB_PAD);
+			//skb_reserve(skb, NET_SKB_PAD);
 			netdev_dbg(adapter->netdev, "to fw: %llu datalen = %lu , diff addr: %d\n", ((u64)pool->index << 32) | index, skb->data_len, pool->dma_map[index].addr - (void *)skb->data );
 		}
 		else {
@@ -271,10 +271,9 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 				goto failure;
 			pool->dma_map[index].dma_addr = dma_addr;
 			pool->dma_map[index].addr = skb->data;
-			pool->skbuff[index] = skb;
-
 		}
-
+		pool->skbuff[index] = skb;
+		
 		pool->free_map[free_index] = IBM_VETH_INVALID_MAP;
 
 		correlator = ((u64)pool->index << 32) | index;
