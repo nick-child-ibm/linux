@@ -432,7 +432,7 @@ static inline struct sk_buff *ibmveth_rxq_get_buffer(struct ibmveth_adapter *ada
 
 	BUG_ON(pool >= IBMVETH_NUM_BUFF_POOLS);
 	BUG_ON(index >= adapter->rx_buff_pool[pool].size);
-	*(u64 *)&adapter->rx_buff_pool[pool].skbuff[index].cb[40] = correlator;
+	*(u64 *)&adapter->rx_buff_pool[pool].skbuff[index]->cb[40] = correlator;
 	return adapter->rx_buff_pool[pool].skbuff[index];
 }
 
