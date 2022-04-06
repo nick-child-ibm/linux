@@ -249,7 +249,7 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 
 			// this is the hard part
 			// we need to turn a full skb into the output of netdev_alloc_skb(adapter->netdev, pool->buff_size);
-			skb = napi_build_skb(skb, skb->head_frag ? skb-> : 0);
+			skb = napi_build_skb(skb, skb->head_frag ? skb->truesize : 0);
 			skb_reserve(skb, NET_SKB_PAD);
 			netdev_dbg(adapter->netdev, "to fw: %llu\n", ((u64)pool->index << 32) | index);
 		}
