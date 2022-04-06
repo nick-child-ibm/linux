@@ -529,7 +529,7 @@ static int ibmveth_open(struct net_device *netdev)
 	struct device *dev;
 
 	netdev_dbg(netdev, "open starting\n");
-
+	spin_lock_init(&adapter->lock);
 	napi_enable(&adapter->napi);
 
 	for(i = 0; i < IBMVETH_NUM_BUFF_POOLS; i++)
@@ -1397,7 +1397,9 @@ static int ibmveth_poll(struct napi_struct *napi, int budget)
 				ibmveth_rxq_harvest_buffer(adapter, *(u64 *)&skb->cb[40]);
 				skb_reserve(skb, offset);
 			}
+			spin_lock(&adapter->lock);
 			netdev_dbg(adapter->netdev, "to netstack: %llu\n", *(u64 *)&skb->cb[40]);
+			spin_unlock(&adapter->lock);
 			skb_put(skb, length);
 			skb->protocol = eth_type_trans(skb, netdev);
 

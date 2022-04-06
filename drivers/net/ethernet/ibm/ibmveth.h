@@ -148,7 +148,7 @@ struct ibmveth_adapter {
     bool is_active_trunk;
     void *bounce_buffer;
     dma_addr_t bounce_buffer_dma;
-
+    spinlock_t lock;
     u64 fw_ipv6_csum_support;
     u64 fw_ipv4_csum_support;
     u64 fw_large_send_support;
