@@ -108,7 +108,7 @@ static int pool_active[] = { 1, 1, 0, 0, 1};
 
 struct rx_dma_map {
     dma_addr_t dma_addr;
-    u8 addr;
+    void * addr;
 };
 
 struct ibmveth_buff_pool {
