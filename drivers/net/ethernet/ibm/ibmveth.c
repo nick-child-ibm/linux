@@ -208,7 +208,9 @@ static void reuse_skb(struct sk_buff *skb) {
 	
 	BUG_ON((correlator >> 32) > IBMVETH_NUM_BUFF_POOLS);
 	BUG_ON((correlator & 0xffffffffUL) > adapter->rx_buff_pool[correlator >> 32].size);
-	netdev_dbg(adapter->netdev, "to unalloc: %llu\n", correlator);
+	netdev_dbg(adapter->netdev, "to unalloc: %llu diff_addr: %d\n", correlator, adapter->rx_buff_pool[correlator >> 32]->dma_map[correlator & 0xffffffffUL].addr - (void *)skb->data );
+			netdev_dbg(adapter->netdev, "to fw: %llu datalen = %lu , diff addr: %d\n", ((u64)pool->index << 32) | index, skb->data_len);
+
 	ibmveth_remove_buffer_from_pool(adapter, correlator);
 
 }
@@ -242,36 +244,33 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 		BUG_ON(index == IBM_VETH_INVALID_MAP);
 		
 
-		/* if pool->skbuff[index] is not null then we can recycle the buffer */
-		if (pool->skbuff[index] != NULL) {
-			skb = pool->skbuff[index];
-			dma_addr = pool->dma_map[index].dma_addr;
+		/* if pool->skbuff[index] is null then we need to alloc and map a new buffer */
+		if (pool->skbuff[index] == NULL) {
+			pool->dma_map[index].addr = dma_alloc_coherent(&adapter->vdev->dev, pool->buff_size,
+				   &pool->dma_map[index].dma_addr, GFP_KERNEL);
 
-			// this is the hard part
-			// we need to turn a full skb into the output of netdev_alloc_skb(adapter->netdev, pool->buff_size);
-			skb = napi_build_skb(pool->dma_map[index].addr, skb->head_frag ? skb->truesize : 0);
-			//skb_reserve(skb, NET_SKB_PAD);
-			netdev_dbg(adapter->netdev, "to fw: %llu datalen = %lu , diff addr: %d\n", ((u64)pool->index << 32) | index, skb->data_len, pool->dma_map[index].addr - (void *)skb->data );
-		}
-		else {
-			skb = netdev_alloc_skb(adapter->netdev, pool->buff_size);
-
-			if (!skb) {
-				netdev_dbg(adapter->netdev,
-					   "replenish: unable to allocate skb\n");
+			if (pool->dma_map[index].addr) {
+				netdev_err(adapter->netdev, "unable to alloc rx buffer\n");
 				adapter->replenish_no_mem++;
-				break;
+				goto failure; // TODO make sure this cleans up correctly
 			}
-
-
-			dma_addr = dma_map_single(&adapter->vdev->dev, skb->data,
-					pool->buff_size, DMA_FROM_DEVICE);
-
-			if (dma_mapping_error(&adapter->vdev->dev, dma_addr))
-				goto failure;
-			pool->dma_map[index].dma_addr = dma_addr;
-			pool->dma_map[index].addr = skb->data;
 		}
+
+		
+		dma_addr = pool->dma_map[index].dma_addr;
+
+		// this is the hard part
+		// we need to turn alloc'd data into the output of netdev_alloc_skb(adapter->netdev, pool->buff_size);
+		skb = napi_build_skb(pool->dma_map[index].addr, 0);
+		if (!skb) {
+			netdev_dbg(adapter->netdev,
+				   "replenish: unable to allocate skb\n");
+			adapter->replenish_no_mem++;
+			break;
+		}
+			//skb_reserve(skb, NET_SKB_PAD);
+		netdev_dbg(adapter->netdev, "to fw: %llu datalen = %lu , diff addr: %d\n", ((u64)pool->index << 32) | index, skb->data_len, pool->dma_map[index].addr - (void *)skb->data );
+		
 		pool->skbuff[index] = skb;
 
 		pool->free_map[free_index] = IBM_VETH_INVALID_MAP;
