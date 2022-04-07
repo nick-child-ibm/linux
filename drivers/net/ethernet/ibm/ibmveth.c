@@ -368,10 +368,11 @@ static void ibmveth_free_buffer_pool(struct ibmveth_adapter *adapter,
 		for (i = 0; i < pool->size; ++i) {
 			struct sk_buff *skb = pool->skbuff[i];
 			if (skb) {
-				dma_unmap_single(&adapter->vdev->dev,
-						 pool->dma_map[i].dma_addr,
-						 pool->buff_size,
-						 DMA_FROM_DEVICE);
+				dma_free_coherent(&adapter->vdev->dev, 
+						pool->buff_size,
+				   		pool->dma_map[index].addr, 
+				   		pool->dma_map[index].dma_addr);
+				skb->destructor = NULL;
 				dev_kfree_skb_any(skb);
 				pool->skbuff[i] = NULL;
 			}
