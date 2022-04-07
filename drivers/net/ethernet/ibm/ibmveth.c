@@ -250,7 +250,7 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 			pool->dma_map[index].addr = dma_alloc_coherent(&adapter->vdev->dev, pool->buff_size,
 				   &pool->dma_map[index].dma_addr, GFP_KERNEL);
 
-			if (pool->dma_map[index].addr) {
+			if (!pool->dma_map[index].addr) {
 				netdev_err(adapter->netdev, "unable to alloc rx buffer\n");
 				adapter->replenish_no_mem++;
 				goto failure; // TODO make sure this cleans up correctly
