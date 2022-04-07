@@ -209,7 +209,6 @@ static void reuse_skb(struct sk_buff *skb) {
 	BUG_ON((correlator >> 32) > IBMVETH_NUM_BUFF_POOLS);
 	BUG_ON((correlator & 0xffffffffUL) > adapter->rx_buff_pool[correlator >> 32].size);
 	netdev_dbg(adapter->netdev, "to unalloc: %llu diff_addr: %d\n", correlator, adapter->rx_buff_pool[correlator >> 32]->dma_map[correlator & 0xffffffffUL].addr - (void *)skb->data );
-			netdev_dbg(adapter->netdev, "to fw: %llu datalen = %lu , diff addr: %d\n", ((u64)pool->index << 32) | index, skb->data_len);
 
 	ibmveth_remove_buffer_from_pool(adapter, correlator);
 
