@@ -103,7 +103,6 @@ static inline long h_illan_attributes(unsigned long unit_address,
 #define IBMVETH_BUFF_LIST_SIZE 4096
 #define IBMVETH_FILT_LIST_SIZE 4096
 #define IBMVETH_MAX_BUF_SIZE (1024 * 128)
-#define IBMVETH_MAX_FRAGS_TO_FW 6 /* max buffers we can give to FW on xmit */
 
 static int pool_size[] = { 512, 1024 * 2, 1024 * 16, 1024 * 32, 1024 * 64 };
 static int pool_count[] = { 256, 512, 256, 256, 256 };
@@ -143,8 +142,8 @@ struct ibmveth_adapter {
     unsigned int mcastFilterSize;
     void * buffer_list_addr;
     void * filter_list_addr;
-    void * tx_ptrs[IBMVETH_MAX_FRAGS_TO_FW];
-    dma_addr_t tx_dma[IBMVETH_MAX_FRAGS_TO_FW];
+    void * tx_ltb_ptr;
+    dma_addr_t tx_ltb_dma;
     dma_addr_t buffer_list_dma;
     dma_addr_t filter_list_dma;
     struct ibmveth_buff_pool rx_buff_pool[IBMVETH_NUM_BUFF_POOLS];

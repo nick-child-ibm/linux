@@ -538,22 +538,21 @@ static int ibmveth_open(struct net_device *netdev)
 		goto out_unmap_buffer_list;
 	}
 
-	for (i = 0; i < IBMVETH_MAX_FRAGS_TO_FW; i++) {
-		adapter->tx_ptrs[i] =
+	
+	adapter->tx_ltb_ptr =
 			(void *)kcalloc(1, IBMVETH_MAX_BUF_SIZE, GFP_KERNEL);
-		if (!adapter->tx_ptrs[i]) {
-			netdev_err(netdev,
-				   "unable to allocate transmit pages\n");
-			goto out_free_tx_ptrs;
-		}
-		adapter->tx_dma[i] =
-			dma_map_single(dev, adapter->tx_ptrs[i],
-				       IBMVETH_MAX_BUF_SIZE, DMA_TO_DEVICE);
-		if (dma_mapping_error(dev, adapter->tx_dma[i])) {
-			netdev_err(netdev, "unable to map transmit pages\n");
-			goto out_unmap_tx_dma;
-		}
+	if (!adapter->tx_ltb_ptr) {
+		netdev_err(netdev,
+		   "unable to allocate transmit long term buffer\n");
+		goto out_unmap_buffer_list;
 	}
+	adapter->tx_ltb_dma = dma_map_single(dev, adapter->tx_ltb_ptr,
+				       IBMVETH_MAX_BUF_SIZE, DMA_TO_DEVICE);
+	if (dma_mapping_error(dev, adapter->tx_ltb_dma)) {
+		netdev_err(netdev, "unable to DMA map transmit long term buffer\n");
+		goto out_unmap_tx_dma;
+	}
+
 
 	adapter->rx_queue.index = 0;
 	adapter->rx_queue.num_slots = rxq_entries;
@@ -642,13 +641,7 @@ out_unmap_filter_list:
 			 DMA_BIDIRECTIONAL);
 
 out_unmap_tx_dma:
-	kfree(adapter->tx_ptrs[i]);
-out_free_tx_ptrs:
-	while (--i >= 0) {
-		dma_unmap_single(dev, adapter->tx_dma[i], IBMVETH_MAX_BUF_SIZE,
-				 DMA_TO_DEVICE);
-		kfree(adapter->tx_ptrs[i]);
-	}
+	kfree(adapter->tx_ltb_ptr);
 
 out_unmap_buffer_list:
 	dma_unmap_single(dev, adapter->buffer_list_dma, 4096,
@@ -712,11 +705,9 @@ static int ibmveth_close(struct net_device *netdev)
 			ibmveth_free_buffer_pool(adapter,
 						 &adapter->rx_buff_pool[i]);
 
-	for (i = 0; i < IBMVETH_MAX_FRAGS_TO_FW; i++) {
-		dma_unmap_single(dev, adapter->tx_dma[i], IBMVETH_MAX_BUF_SIZE,
+	dma_unmap_single(dev, adapter->tx_ltb_dma, IBMVETH_MAX_BUF_SIZE,
 				 DMA_TO_DEVICE);
-		kfree(adapter->tx_ptrs[i]);
-	}
+	kfree(adapter->tx_ltb_ptr);
 
 	dma_free_coherent(&adapter->vdev->dev,
 			  adapter->netdev->mtu + IBMVETH_BUFF_OH,
@@ -1057,6 +1048,7 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 	union ibmveth_buf_desc descs[IBMVETH_MAX_FRAGS_TO_FW];
 	int i;
 	unsigned long mss = 0;
+	size_t total_bytes;
 
 	if (ibmveth_is_packet_unsupported(skb, netdev))
 		goto out;
@@ -1152,21 +1144,21 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 	}
 
 	/* Copy header into mapped buffer */
-	BUG_ON(skb_headlen(skb) > IBMVETH_MAX_BUF_SIZE);
-	memcpy(adapter->tx_ptrs[0], skb->data, skb_headlen(skb));
-	descs[0].fields.flags_len = desc_flags | skb_headlen(skb);
-	descs[0].fields.address = adapter->tx_dma[0];
-
+	BUG_ON(skb->len > IBMVETH_MAX_BUF_SIZE);
+	memcpy(adapter->tx_ltb_ptr, skb->data, skb_headlen(skb));
+	total_bytes = skb_headlen(skb);
 	/* Copy frags into mapped buffers */
 	for (i = 0; i < skb_shinfo(skb)->nr_frags; i++) {
 		const skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
 		BUG_ON(skb_frag_size(frag) > IBMVETH_MAX_BUF_SIZE);
-		memcpy(adapter->tx_ptrs[i + 1], skb_frag_address_safe(frag),
+		memcpy(adapter->tx_ltb_ptr + total_bytes, skb_frag_address_safe(frag),
 		       skb_frag_size(frag));
-		descs[i + 1].fields.flags_len =
-			desc_flags | skb_frag_size(frag);
-		descs[i + 1].fields.address = adapter->tx_dma[i + 1];
+		total_bytes += skb_frag_size(frag);
 	}
+
+	BUG_ON(total_bytes != skb->len);
+	descs[0].fields.flags_len = desc_flags | skb->len;
+	descs[0].fields.address = adapter->tx_ltb_dma;
 
 	if (ibmveth_send(adapter, descs, mss)) {
 		adapter->tx_send_failed++;
