@@ -538,9 +538,9 @@ static int ibmveth_open(struct net_device *netdev)
 		goto out_unmap_buffer_list;
 	}
 
-	
+	adapter->tx_ltb_size = PAGE_ALIGN(IBMVETH_MAX_BUF_SIZE);
 	adapter->tx_ltb_ptr =
-			(void *)kcalloc(1, IBMVETH_MAX_BUF_SIZE, GFP_KERNEL);
+			(void *)kcalloc(1, adapter->tx_ltb_size, GFP_KERNEL);
 	if (!adapter->tx_ltb_ptr) {
 		netdev_err(netdev,
 		   "unable to allocate transmit long term buffer\n");
@@ -705,7 +705,7 @@ static int ibmveth_close(struct net_device *netdev)
 			ibmveth_free_buffer_pool(adapter,
 						 &adapter->rx_buff_pool[i]);
 
-	dma_unmap_single(dev, adapter->tx_ltb_dma, IBMVETH_MAX_BUF_SIZE,
+	dma_unmap_single(dev, adapter->tx_ltb_dma, adapter->tx_ltb_size,
 				 DMA_TO_DEVICE);
 	kfree(adapter->tx_ltb_ptr);
 
@@ -1101,13 +1101,12 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 	}
 
 	/* Copy header into mapped buffer */
-	BUG_ON(skb->len > IBMVETH_MAX_BUF_SIZE);
+	BUG_ON(skb->len > adapter->tx_ltb_size);
 	memcpy(adapter->tx_ltb_ptr, skb->data, skb_headlen(skb));
 	total_bytes = skb_headlen(skb);
 	/* Copy frags into mapped buffers */
 	for (i = 0; i < skb_shinfo(skb)->nr_frags; i++) {
 		const skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
-		BUG_ON(skb_frag_size(frag) > IBMVETH_MAX_BUF_SIZE);
 		memcpy(adapter->tx_ltb_ptr + total_bytes, skb_frag_address_safe(frag),
 		       skb_frag_size(frag));
 		total_bytes += skb_frag_size(frag);

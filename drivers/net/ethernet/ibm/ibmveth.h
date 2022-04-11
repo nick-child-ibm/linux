@@ -144,6 +144,7 @@ struct ibmveth_adapter {
     void * buffer_list_addr;
     void * filter_list_addr;
     void * tx_ltb_ptr;
+    unsigned int tx_ltb_size;
     dma_addr_t tx_ltb_dma;
     dma_addr_t buffer_list_dma;
     dma_addr_t filter_list_dma;
