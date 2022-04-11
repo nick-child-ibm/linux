@@ -547,7 +547,7 @@ static int ibmveth_open(struct net_device *netdev)
 		goto out_unmap_buffer_list;
 	}
 	adapter->tx_ltb_dma = dma_map_single(dev, adapter->tx_ltb_ptr,
-				       IBMVETH_MAX_BUF_SIZE, DMA_TO_DEVICE);
+				       adapter->tx_ltb_size, DMA_TO_DEVICE);
 	if (dma_mapping_error(dev, adapter->tx_ltb_dma)) {
 		netdev_err(netdev, "unable to DMA map transmit long term buffer\n");
 		goto out_unmap_tx_dma;
@@ -1115,6 +1115,8 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 	BUG_ON(total_bytes != skb->len);
 	descs[0].fields.flags_len = desc_flags | skb->len;
 	descs[0].fields.address = adapter->tx_ltb_dma;
+	/* finish writing to long_term_buff before VIOS accessing it */
+	dma_wmb();
 
 	if (ibmveth_send(adapter, descs, mss)) {
 		adapter->tx_send_failed++;
