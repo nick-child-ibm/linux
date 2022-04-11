@@ -538,19 +538,21 @@ static int ibmveth_open(struct net_device *netdev)
 		goto out_unmap_buffer_list;
 	}
 
-	adapter->tx_ltb_size = PAGE_ALIGN(IBMVETH_MAX_TX_BUF_SIZE);
-	adapter->tx_ltb_ptr =
-			(void *)kcalloc(1, adapter->tx_ltb_size, GFP_KERNEL);
-	if (!adapter->tx_ltb_ptr) {
-		netdev_err(netdev,
-		   "unable to allocate transmit long term buffer\n");
-		goto out_unmap_buffer_list;
-	}
-	adapter->tx_ltb_dma = dma_map_single(dev, adapter->tx_ltb_ptr,
-				       adapter->tx_ltb_size, DMA_TO_DEVICE);
-	if (dma_mapping_error(dev, adapter->tx_ltb_dma)) {
-		netdev_err(netdev, "unable to DMA map transmit long term buffer\n");
-		goto out_unmap_tx_dma;
+	for (i = 0; i < IBMVETH_MAX_QUEUES; i++) {
+		adapter->tx_ltb_size = PAGE_ALIGN(IBMVETH_MAX_TX_BUF_SIZE);
+		adapter->tx_ltb_ptr[i] =
+				(void *)kcalloc(1, adapter->tx_ltb_size, GFP_KERNEL);
+		if (!adapter->tx_ltb_ptr) {
+			netdev_err(netdev,
+			   "unable to allocate transmit long term buffer\n");
+			goto out_free_tx_ltb_ptrs;
+		}
+		adapter->tx_ltb_dma[i] = dma_map_single(dev, adapter->tx_ltb_ptr[i],
+				       	adapter->tx_ltb_size, DMA_TO_DEVICE);
+		if (dma_mapping_error(dev, adapter->tx_ltb_dma[i])) {
+			netdev_err(netdev, "unable to DMA map transmit long term buffer\n");
+			goto out_unmap_tx_dma;
+		}
 	}
 
 
@@ -641,7 +643,14 @@ out_unmap_filter_list:
 			 DMA_BIDIRECTIONAL);
 
 out_unmap_tx_dma:
-	kfree(adapter->tx_ltb_ptr);
+	kfree(adapter->tx_ltb_ptr[i]);
+
+out_free_tx_ltb_ptrs:
+	while (--i >= 0) {
+		dma_unmap_single(dev, adapter->tx_ltb_dma[i], adapter->tx_ltb_size,
+				DMA_TO_DEVICE);
+		kfree(adapter->tx_ltb_ptr[i]);
+	}
 
 out_unmap_buffer_list:
 	dma_unmap_single(dev, adapter->buffer_list_dma, 4096,
@@ -704,10 +713,11 @@ static int ibmveth_close(struct net_device *netdev)
 		if (adapter->rx_buff_pool[i].active)
 			ibmveth_free_buffer_pool(adapter,
 						 &adapter->rx_buff_pool[i]);
-
-	dma_unmap_single(dev, adapter->tx_ltb_dma, adapter->tx_ltb_size,
+	for (i = 0; i < IBMVETH_MAX_QUEUES; i++) {
+		dma_unmap_single(dev, adapter->tx_ltb_dma[i], adapter->tx_ltb_size,
 				 DMA_TO_DEVICE);
-	kfree(adapter->tx_ltb_ptr);
+		kfree(adapter->tx_ltb_ptr[i]);
+	}
 
 	dma_free_coherent(&adapter->vdev->dev,
 			  adapter->netdev->mtu + IBMVETH_BUFF_OH,
@@ -1044,15 +1054,16 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 				      struct net_device *netdev)
 {
 	struct ibmveth_adapter *adapter = netdev_priv(netdev);
+	struct netdev_queue *txq;
 	unsigned int desc_flags;
 	union ibmveth_buf_desc descs[IBMVETH_MAX_FRAGS_TO_FW];
-	int i;
+	int i, queue_num = skb_get_queue_mapping(skb);;
 	unsigned long mss = 0;
 	size_t total_bytes;
 
 	if (ibmveth_is_packet_unsupported(skb, netdev))
 		goto out;
-
+	txq = netdev_get_tx_queue(netdev, queue_num);
 	/* veth can't checksum offload UDP */
 	if (skb->ip_summed == CHECKSUM_PARTIAL &&
 	    ((skb->protocol == htons(ETH_P_IP) &&
@@ -1102,19 +1113,19 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 
 	/* Copy header into mapped buffer */
 	BUG_ON(skb->len > adapter->tx_ltb_size);
-	memcpy(adapter->tx_ltb_ptr, skb->data, skb_headlen(skb));
+	memcpy(adapter->tx_ltb_ptr[queue_num], skb->data, skb_headlen(skb));
 	total_bytes = skb_headlen(skb);
 	/* Copy frags into mapped buffers */
 	for (i = 0; i < skb_shinfo(skb)->nr_frags; i++) {
 		const skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
-		memcpy(adapter->tx_ltb_ptr + total_bytes, skb_frag_address_safe(frag),
+		memcpy(adapter->tx_ltb_ptr[queue_num] + total_bytes, skb_frag_address_safe(frag),
 		       skb_frag_size(frag));
 		total_bytes += skb_frag_size(frag);
 	}
 
 	BUG_ON(total_bytes != skb->len);
 	descs[0].fields.flags_len = desc_flags | skb->len;
-	descs[0].fields.address = adapter->tx_ltb_dma;
+	descs[0].fields.address = adapter->tx_ltb_dma[queue_num];
 	/* finish writing to long_term_buff before VIOS accessing it */
 	dma_wmb();
 
@@ -1607,7 +1618,7 @@ static int ibmveth_probe(struct vio_dev *dev, const struct vio_device_id *id)
 		return -EINVAL;
 	}
 
-	netdev = alloc_etherdev(sizeof(struct ibmveth_adapter));
+	netdev = alloc_etherdev_mq(sizeof(struct ibmveth_adapter), IBMVETH_MAX_QUEUES);
 
 	if (!netdev)
 		return -ENOMEM;
