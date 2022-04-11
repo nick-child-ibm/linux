@@ -538,7 +538,7 @@ static int ibmveth_open(struct net_device *netdev)
 		goto out_unmap_buffer_list;
 	}
 
-	adapter->tx_ltb_size = PAGE_ALIGN(IBMVETH_MAX_BUF_SIZE);
+	adapter->tx_ltb_size = PAGE_ALIGN(IBMVETH_MAX_TX_BUF_SIZE);
 	adapter->tx_ltb_ptr =
 			(void *)kcalloc(1, adapter->tx_ltb_size, GFP_KERNEL);
 	if (!adapter->tx_ltb_ptr) {
@@ -1514,7 +1514,7 @@ static unsigned long ibmveth_get_desired_dma(struct vio_dev *vdev)
 	ret = IBMVETH_BUFF_LIST_SIZE + IBMVETH_FILT_LIST_SIZE;
 	ret += IOMMU_PAGE_ALIGN(netdev->mtu, tbl);
 	/* add size of mapped tx buffers */
-	ret += IOMMU_PAGE_ALIGN(IBMVETH_MAX_BUF_SIZE, tbl);
+	ret += IOMMU_PAGE_ALIGN(IBMVETH_MAX_TX_BUF_SIZE, tbl);
 
 	for (i = 0; i < IBMVETH_NUM_BUFF_POOLS; i++) {
 		/* add the size of the active receive buffers */
