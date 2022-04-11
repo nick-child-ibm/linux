@@ -1053,26 +1053,6 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 	if (ibmveth_is_packet_unsupported(skb, netdev))
 		goto out;
 
-	/* veth doesn't handle frag_list, so linearize the skb.
-	 * When GRO is enabled SKB's can have frag_list.
-	 */
-	if (adapter->is_active_trunk &&
-	    skb_has_frag_list(skb) && __skb_linearize(skb)) {
-		netdev->stats.tx_dropped++;
-		goto out;
-	}
-
-	/*
-	 * veth handles a maximum of IBMVETH_MAX_FRAGS_TO_FW segments 
-	 * including the header, so we have to linearize the skb if there 
-	 * are more than this.
-	 */
-	if (skb_shinfo(skb)->nr_frags > IBMVETH_MAX_FRAGS_TO_FW - 1 &&
-	    __skb_linearize(skb)) {
-		netdev->stats.tx_dropped++;
-		goto out;
-	}
-
 	/* veth can't checksum offload UDP */
 	if (skb->ip_summed == CHECKSUM_PARTIAL &&
 	    ((skb->protocol == htons(ETH_P_IP) &&
@@ -1103,29 +1083,6 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 	}
 
 	memset(descs, 0, sizeof(descs));
-
-	/*
-	 * If a linear packet is below the rx threshold then
-	 * copy it into the static bounce buffer. This avoids the
-	 * cost of a TCE insert and remove.
-	 */
-	if (!skb_is_nonlinear(skb) && (skb->len < tx_copybreak)) {
-		skb_copy_from_linear_data(skb, adapter->bounce_buffer,
-					  skb->len);
-
-		descs[0].fields.flags_len = desc_flags | skb->len;
-		descs[0].fields.address = adapter->bounce_buffer_dma;
-
-		if (ibmveth_send(adapter, descs, 0)) {
-			adapter->tx_send_failed++;
-			netdev->stats.tx_dropped++;
-		} else {
-			netdev->stats.tx_packets++;
-			netdev->stats.tx_bytes += skb->len;
-		}
-
-		goto out;
-	}
 
 	if (skb->ip_summed == CHECKSUM_PARTIAL && skb_is_gso(skb)) {
 		if (adapter->fw_large_send_support) {
@@ -1556,8 +1513,7 @@ static unsigned long ibmveth_get_desired_dma(struct vio_dev *vdev)
 	ret = IBMVETH_BUFF_LIST_SIZE + IBMVETH_FILT_LIST_SIZE;
 	ret += IOMMU_PAGE_ALIGN(netdev->mtu, tbl);
 	/* add size of mapped tx buffers */
-	ret += IBMVETH_MAX_FRAGS_TO_FW *
-	       IOMMU_PAGE_ALIGN(IBMVETH_MAX_BUF_SIZE, tbl);
+	ret += IOMMU_PAGE_ALIGN(IBMVETH_MAX_BUF_SIZE, tbl);
 
 	for (i = 0; i < IBMVETH_NUM_BUFF_POOLS; i++) {
 		/* add the size of the active receive buffers */
