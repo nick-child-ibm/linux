@@ -603,6 +603,7 @@ static int ibmveth_open(struct net_device *netdev)
 		goto out_free_irq;
 	}
 
+	netif_carrier_on(netdev);
 	netdev_dbg(netdev, "initial replenish cycle\n");
 	ibmveth_interrupt(netdev->irq, netdev);
 
@@ -1731,6 +1732,7 @@ static int ibmveth_probe(struct vio_dev *dev, const struct vio_device_id *id)
 	netdev_dbg(netdev, "registering netdev...\n");
 
 	ibmveth_set_features(netdev, netdev->features);
+	netif_carrier_off(netdev);
 
 	rc = register_netdev(netdev);
 
