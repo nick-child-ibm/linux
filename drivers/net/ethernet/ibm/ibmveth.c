@@ -624,7 +624,7 @@ static int ibmveth_open(struct net_device *netdev)
 	netdev_dbg(netdev, "initial replenish cycle\n");
 	ibmveth_interrupt(netdev->irq, netdev);
 
-	netif_start_queue(netdev);
+	netif_tx_start_all_queues(netdev);
 
 	netdev_dbg(netdev, "open complete\n");
 
@@ -680,7 +680,7 @@ static int ibmveth_close(struct net_device *netdev)
 	napi_disable(&adapter->napi);
 
 	if (!adapter->pool_config)
-		netif_stop_queue(netdev);
+		netif_tx_stop_all_queues(netdev);
 
 	h_vio_signal(adapter->vdev->unit_address, VIO_IRQ_DISABLE);
 
