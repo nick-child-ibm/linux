@@ -57,14 +57,14 @@ static inline long h_send_logical_lan(unsigned long unit_address,
 		unsigned long mss, unsigned long large_send_support)
 {
 	long rc;
-	unsigned long retbuf[PLPAR_HCALL9_BUFSIZE];
+	unsigned long retbuf[PLPAR_HCALL_BUFSIZE];
 
 	if (large_send_support)
-		rc = plpar_hcall9(H_SEND_LOGICAL_LAN, retbuf, unit_address,
+		rc = plpar_hcall(H_SEND_LOGICAL_LAN, retbuf, unit_address,
 				  desc,
 				  corellator_in, mss);
 	else
-		rc = plpar_hcall9(H_SEND_LOGICAL_LAN, retbuf, unit_address,
+		rc = plpar_hcall(H_SEND_LOGICAL_LAN, retbuf, unit_address,
 				  desc,
 				  corellator_in);
 
