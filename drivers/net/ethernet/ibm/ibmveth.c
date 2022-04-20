@@ -1114,12 +1114,12 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 
 	/* Copy header into mapped buffer */
 	BUG_ON(skb->len > adapter->tx_ltb_size);
-	memcpy(adapter->tx_ltb_ptr[queue_num], skb->data, skb_headlen(skb));
+	memcpy(adapter->tx_ltb_ptr[adapter->desc_count], skb->data, skb_headlen(skb));
 	total_bytes = skb_headlen(skb);
 	/* Copy frags into mapped buffers */
 	for (i = 0; i < skb_shinfo(skb)->nr_frags; i++) {
 		const skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
-		memcpy(adapter->tx_ltb_ptr[queue_num] + total_bytes, skb_frag_address_safe(frag),
+		memcpy(adapter->tx_ltb_ptr[adapter->desc_count] + total_bytes, skb_frag_address_safe(frag),
 		       skb_frag_size(frag));
 		total_bytes += skb_frag_size(frag);
 	}
