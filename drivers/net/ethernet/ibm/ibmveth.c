@@ -993,7 +993,7 @@ static int ibmveth_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 }
 
 static int ibmveth_send(struct ibmveth_adapter *adapter,
-			union ibmveth_buf_desc *descs, unsigned long mss)
+			union ibmveth_buf_desc descs, unsigned long mss)
 {
 	unsigned long correlator;
 	unsigned int retry_count;
@@ -1007,9 +1007,7 @@ static int ibmveth_send(struct ibmveth_adapter *adapter,
 	correlator = 0;
 	do {
 		ret = h_send_logical_lan(adapter->vdev->unit_address,
-					     descs[0].desc, descs[1].desc,
-					     descs[2].desc, descs[3].desc,
-					     descs[4].desc, descs[5].desc,
+					     descs,
 					     correlator, &correlator, mss,
 					     adapter->fw_large_send_support);
 	} while ((ret == H_BUSY) && (retry_count--));
@@ -1045,7 +1043,7 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 {
 	struct ibmveth_adapter *adapter = netdev_priv(netdev);
 	unsigned int desc_flags;
-	union ibmveth_buf_desc descs[IBMVETH_MAX_FRAGS_TO_FW];
+	union ibmveth_buf_desc descs;
 	int i;
 	unsigned long mss = 0;
 	size_t total_bytes;
@@ -1113,8 +1111,8 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 	}
 
 	BUG_ON(total_bytes != skb->len);
-	descs[0].fields.flags_len = desc_flags | skb->len;
-	descs[0].fields.address = adapter->tx_ltb_dma;
+	descs.fields.flags_len = desc_flags | skb->len;
+	descs.fields.address = adapter->tx_ltb_dma;
 	/* finish writing to long_term_buff before VIOS accessing it */
 	dma_wmb();
 
