@@ -620,7 +620,8 @@ static int ibmveth_open(struct net_device *netdev)
 		netdev_err(netdev, "unable to alloc bounce buffer\n");
 		goto out_free_irq;
 	}
-
+	adapter->tx_queue_idx = 0;
+	
 	netdev_dbg(netdev, "initial replenish cycle\n");
 	ibmveth_interrupt(netdev->irq, netdev);
 
@@ -1049,7 +1050,14 @@ static int ibmveth_is_packet_unsupported(struct sk_buff *skb,
 
 	return ret;
 }
-
+static u16 ibmveth_select_tx_queue(struct net_device *netdev,
+				  struct sk_buff *skb,
+				  struct net_device *sb_dev)
+{
+	struct ibmveth_adapter *adapter = netdev_priv(netdev);
+	adapter->tx_queue_idx = (adapter->tx_queue_idx + 1) % IBMVETH_MAX_QUEUES;
+	return adapter->tx_queue_idx;
+}
 static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 				      struct net_device *netdev)
 {
@@ -1570,6 +1578,7 @@ static const struct net_device_ops ibmveth_netdev_ops = {
 	.ndo_stop		= ibmveth_close,
 	.ndo_start_xmit		= ibmveth_start_xmit,
 	.ndo_set_rx_mode	= ibmveth_set_multicast_list,
+	.ndo_select_queue	= ibmveth_select_tx_queue,
 	.ndo_eth_ioctl		= ibmveth_ioctl,
 	.ndo_change_mtu		= ibmveth_change_mtu,
 	.ndo_fix_features	= ibmveth_fix_features,
