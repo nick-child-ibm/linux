@@ -621,6 +621,9 @@ static int ibmveth_open(struct net_device *netdev)
 		goto out_free_irq;
 	}
 
+	memset(adapter->descs, 0, sizeof(adapter->descs));
+	adapter->desc_count = 0;
+
 	netdev_dbg(netdev, "initial replenish cycle\n");
 	ibmveth_interrupt(netdev->irq, netdev);
 
