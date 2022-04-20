@@ -1080,7 +1080,7 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 			desc_flags |= IBMVETH_BUF_LRG_SND;
 	}
 
-	memset(descs, 0, sizeof(descs));
+	memset(&descs, 0, sizeof(descs));
 
 	if (skb->ip_summed == CHECKSUM_PARTIAL && skb_is_gso(skb)) {
 		if (adapter->fw_large_send_support) {
