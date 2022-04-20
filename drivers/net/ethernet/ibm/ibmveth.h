@@ -105,7 +105,7 @@ static inline long h_illan_attributes(unsigned long unit_address,
 #define IBMVETH_MAX_BUF_SIZE (1024 * 128)
 #define IBMVETH_MAX_TX_BUF_SIZE (1024 * 64)
 #define IBMVETH_MAX_FRAGS_TO_FW 6 /* max buffers we can give to FW on xmit */
-#define IBMVETH_MAX_QUEUES 4
+#define IBMVETH_MAX_QUEUES IBMVETH_MAX_FRAGS_TO_FW
 
 static int pool_size[] = { 512, 1024 * 2, 1024 * 16, 1024 * 32, 1024 * 64 };
 static int pool_count[] = { 256, 512, 256, 256, 256 };
@@ -158,7 +158,8 @@ struct ibmveth_adapter {
     bool is_active_trunk;
     void *bounce_buffer;
     dma_addr_t bounce_buffer_dma;
-
+    union ibmveth_buf_desc descs[IBMVETH_MAX_FRAGS_TO_FW];
+    int desc_count;
     u64 fw_ipv6_csum_support;
     u64 fw_ipv4_csum_support;
     u64 fw_large_send_support;

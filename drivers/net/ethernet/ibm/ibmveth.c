@@ -1056,7 +1056,7 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 	struct ibmveth_adapter *adapter = netdev_priv(netdev);
 	struct netdev_queue *txq;
 	unsigned int desc_flags;
-	union ibmveth_buf_desc descs[IBMVETH_MAX_FRAGS_TO_FW];
+	union ibmveth_buf_desc *descs = adapter->descs;
 	int i, queue_num = skb_get_queue_mapping(skb);;
 	unsigned long mss = 0;
 	size_t total_bytes;
@@ -1093,8 +1093,6 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 			desc_flags |= IBMVETH_BUF_LRG_SND;
 	}
 
-	memset(descs, 0, sizeof(descs));
-
 	if (skb->ip_summed == CHECKSUM_PARTIAL && skb_is_gso(skb)) {
 		if (adapter->fw_large_send_support) {
 			mss = (unsigned long)skb_shinfo(skb)->gso_size;
@@ -1124,17 +1122,23 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 	}
 
 	BUG_ON(total_bytes != skb->len);
-	descs[0].fields.flags_len = desc_flags | skb->len;
-	descs[0].fields.address = adapter->tx_ltb_dma[queue_num];
+	descs[adapter->desc_count].fields.flags_len = desc_flags | skb->len;
+	descs[adapter->desc_count].fields.address = adapter->tx_ltb_dma[queue_num];
 	/* finish writing to long_term_buff before VIOS accessing it */
 	dma_wmb();
+	adapter->desc_count++;
+	if (adapter->desc_count >= IBMVETH_MAX_FRAGS_TO_FW) {
 
-	if (ibmveth_send(adapter, descs, mss)) {
-		adapter->tx_send_failed++;
-		netdev->stats.tx_dropped++;
-	} else {
-		netdev->stats.tx_packets++;
-		netdev->stats.tx_bytes += skb->len;
+		if (ibmveth_send(adapter, descs, mss)) {
+			adapter->tx_send_failed+=adapter->desc_count;
+			netdev->stats.tx_dropped+=adapter->desc_count;
+		} else {
+			netdev->stats.tx_packets+=adapter->desc_count;
+			//TODO WRONG
+			netdev->stats.tx_bytes += skb->len;
+		}
+	memset(descs, 0, sizeof(adapter->descs));
+	adapter->desc_count = 0;
 	}
 
 out:
