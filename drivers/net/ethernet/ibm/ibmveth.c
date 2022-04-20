@@ -1007,7 +1007,7 @@ static int ibmveth_send(struct ibmveth_adapter *adapter,
 	correlator = 0;
 	do {
 		ret = h_send_logical_lan(adapter->vdev->unit_address,
-					     descs,
+					     descs.desc,
 					     correlator, &correlator, mss,
 					     adapter->fw_large_send_support);
 	} while ((ret == H_BUSY) && (retry_count--));
