@@ -622,7 +622,6 @@ static int ibmveth_open(struct net_device *netdev)
 		netdev_err(netdev, "unable to alloc bounce buffer\n");
 		goto out_free_irq;
 	}
-	adapter->tx_queue_idx = 0;
 	
 	netdev_dbg(netdev, "initial replenish cycle\n");
 	ibmveth_interrupt(netdev->irq, netdev);
@@ -1156,9 +1155,9 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 	}
 
 out:
-	BUG_ON(adapter->tx_queue_free_map[adapter->tx_queue_producer_idx] != IBM_VETH_INVALID_MAP)
+	BUG_ON(adapter->tx_queue_free_map[adapter->tx_queue_producer_idx] != IBM_VETH_INVALID_MAP);
 	adapter->tx_queue_free_map[adapter->tx_queue_producer_idx] = queue_num;
-	adapter->tx_queue_producer_idx = (adapter->tx_queue_producer_idx + 1) % IBMVETH_MAX_QUEUES
+	adapter->tx_queue_producer_idx = (adapter->tx_queue_producer_idx + 1) % IBMVETH_MAX_QUEUES;
 	dev_consume_skb_any(skb);
 	return NETDEV_TX_OK;
 
