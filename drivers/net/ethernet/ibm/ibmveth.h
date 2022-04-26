@@ -145,6 +145,9 @@ struct ibmveth_adapter {
     unsigned int mcastFilterSize;
     void * buffer_list_addr;
     void * filter_list_addr;
+    int tx_queue_free_map[IBMVETH_MAX_QUEUES];
+    u16 tx_queue_consumer_idx;
+    u16 tx_queue_producer_idx;
     void * tx_ltb_ptr[IBMVETH_MAX_QUEUES];
     unsigned int tx_ltb_size;
     dma_addr_t tx_ltb_dma[IBMVETH_MAX_QUEUES];
@@ -155,7 +158,6 @@ struct ibmveth_adapter {
     int pool_config;
     int rx_csum;
     int large_send;
-    int tx_queue_idx;
     bool is_active_trunk;
     void *bounce_buffer;
     dma_addr_t bounce_buffer_dma;

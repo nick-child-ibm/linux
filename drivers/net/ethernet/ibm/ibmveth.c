@@ -537,8 +537,10 @@ static int ibmveth_open(struct net_device *netdev)
 		netdev_err(netdev, "unable to map filter list pages\n");
 		goto out_unmap_buffer_list;
 	}
-
+	adapter->tx_queue_consumer_idx = 0;
+	adapter->tx_queue_producer_idx = 0;
 	for (i = 0; i < IBMVETH_MAX_QUEUES; i++) {
+		adapter->tx_queue_free_map[i] = i;
 		adapter->tx_ltb_size = PAGE_ALIGN(IBMVETH_MAX_TX_BUF_SIZE);
 		adapter->tx_ltb_ptr[i] =
 				(void *)kcalloc(1, adapter->tx_ltb_size, GFP_KERNEL);
@@ -1055,8 +1057,16 @@ static u16 ibmveth_select_tx_queue(struct net_device *netdev,
 				  struct net_device *sb_dev)
 {
 	struct ibmveth_adapter *adapter = netdev_priv(netdev);
-	adapter->tx_queue_idx = (adapter->tx_queue_idx + 1) % IBMVETH_MAX_QUEUES;
-	return adapter->tx_queue_idx;
+	u16 q;
+	q = adapter->tx_queue_free_map[adapter->tx_queue_consumer_idx];
+	if (q == IBM_VETH_INVALID_MAP) {
+		// This should never happen
+		netdev_dbg(netdev, "No available tx queues cons: %d prod: %d \n",adapter->tx_queue_consumer_idx, adapter->tx_queue_producer_idx );
+		return 0;
+	}
+	adapter->tx_queue_free_map[adapter->tx_queue_consumer_idx] = IBM_VETH_INVALID_MAP;
+	adapter->tx_queue_consumer_idx = (adapter->tx_queue_consumer_idx + 1) % IBMVETH_MAX_QUEUES;
+	return q;
 }
 static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 				      struct net_device *netdev)
@@ -1146,6 +1156,9 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 	}
 
 out:
+	BUG_ON(adapter->tx_queue_free_map[adapter->tx_queue_producer_idx] != IBM_VETH_INVALID_MAP)
+	adapter->tx_queue_free_map[adapter->tx_queue_producer_idx] = queue_num;
+	adapter->tx_queue_producer_idx = (adapter->tx_queue_producer_idx + 1) % IBMVETH_MAX_QUEUES
 	dev_consume_skb_any(skb);
 	return NETDEV_TX_OK;
 
