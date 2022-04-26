@@ -148,6 +148,7 @@ struct ibmveth_adapter {
     int tx_queue_free_map[IBMVETH_MAX_QUEUES];
     u16 tx_queue_consumer_idx;
     u16 tx_queue_producer_idx;
+    spinlock_t tx_lock;
     void * tx_ltb_ptr[IBMVETH_MAX_QUEUES];
     unsigned int tx_ltb_size;
     dma_addr_t tx_ltb_dma[IBMVETH_MAX_QUEUES];

@@ -537,6 +537,7 @@ static int ibmveth_open(struct net_device *netdev)
 		netdev_err(netdev, "unable to map filter list pages\n");
 		goto out_unmap_buffer_list;
 	}
+	spin_lock_init(&adapter->tx_lock);
 	adapter->tx_queue_consumer_idx = 0;
 	adapter->tx_queue_producer_idx = 0;
 	for (i = 0; i < IBMVETH_MAX_QUEUES; i++) {
@@ -1057,6 +1058,7 @@ static u16 ibmveth_select_tx_queue(struct net_device *netdev,
 {
 	struct ibmveth_adapter *adapter = netdev_priv(netdev);
 	u16 q;
+	spin_lock(&adapter->tx_lock);
 	q = adapter->tx_queue_free_map[adapter->tx_queue_consumer_idx];
 	if (q == IBM_VETH_INVALID_MAP) {
 		// This should never happen
@@ -1065,6 +1067,7 @@ static u16 ibmveth_select_tx_queue(struct net_device *netdev,
 	}
 	adapter->tx_queue_free_map[adapter->tx_queue_consumer_idx] = IBM_VETH_INVALID_MAP;
 	adapter->tx_queue_consumer_idx = (adapter->tx_queue_consumer_idx + 1) % IBMVETH_MAX_QUEUES;
+	spin_unlock(&adapter->tx_lock);
 	return q;
 }
 static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
@@ -1155,9 +1158,11 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 	}
 
 out:
+	spin_lock(&adapter->tx_lock);
 	BUG_ON(adapter->tx_queue_free_map[adapter->tx_queue_producer_idx] != IBM_VETH_INVALID_MAP);
 	adapter->tx_queue_free_map[adapter->tx_queue_producer_idx] = queue_num;
 	adapter->tx_queue_producer_idx = (adapter->tx_queue_producer_idx + 1) % IBMVETH_MAX_QUEUES;
+	spin_unlock(&adapter->tx_lock);
 	dev_consume_skb_any(skb);
 	return NETDEV_TX_OK;
 
