@@ -578,6 +578,7 @@ static int ibmveth_open(struct net_device *netdev)
 	}
 
 	for (i = 0; i < netdev->real_num_tx_queues; i++) {
+		netdev_tx_reset_queue(netdev_get_tx_queue(netdev, i));
 		if (ibmveth_allocate_tx_ltb(adapter, i))
 			goto out_free_tx_ltb;
 	}
@@ -1027,8 +1028,10 @@ static int ibmveth_set_channels(struct net_device *netdev,
 			continue;
 
 		rc = ibmveth_allocate_tx_ltb(adapter, i);
-		if (!rc)
+		if (!rc) {
+			netdev_tx_reset_queue(netdev_get_tx_queue(netdev, i));
 			continue;
+		}
 
 		/* if something goes wrong, free everything we just allocated */
 		netdev_err(netdev, "Failed to allocate more tx queues, returning to %d queues\n",
@@ -1125,6 +1128,7 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 	union ibmveth_buf_desc desc;
 	int i, queue_num = skb_get_queue_mapping(skb);
 	unsigned long mss = 0;
+	struct netdev_queue *txq = netdev_get_tx_queue(netdev, queue_num);
 
 	if (ibmveth_is_packet_unsupported(skb, netdev))
 		goto out;
@@ -1202,6 +1206,7 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 	/* finish writing to long_term_buff before VIOS accessing it */
 	dma_wmb();
 
+	netdev_tx_sent_queue(txq, skb->len);
 	if (ibmveth_send(adapter, desc.desc, mss)) {
 		adapter->tx_send_failed++;
 		netdev->stats.tx_dropped++;
@@ -1209,6 +1214,7 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 		netdev->stats.tx_packets++;
 		netdev->stats.tx_bytes += skb->len;
 	}
+	netdev_tx_completed_queue(txq, 1, skb->len);
 
 out:
 	dev_consume_skb_any(skb);
