@@ -175,11 +175,14 @@ static int send_version_xchg(struct ibmvnic_adapter *adapter)
 static void ibmvnic_clean_queue_affinity(struct ibmvnic_adapter *adapter,
 					 struct ibmvnic_sub_crq_queue *queue)
 {
+	// don't need rc TODO
 	int rc = 0;
 
 	if (queue) {
 		cpumask_clear(queue->affinity_mask);
 		if (queue->irq) {
+			// TODO rc not used
+			// function is deprecated
 			rc = irq_set_affinity_hint(queue->irq, NULL);
 			if (rc)
 				netdev_warn(adapter->netdev,
@@ -226,10 +229,10 @@ static void ibmvnic_set_affinity(struct ibmvnic_adapter *adapter)
 	int num_cpu;
 	int stride;
 	int rc;
-
+	// TODO we have failures with no debug messages
 	if (!(adapter->rx_scrq && adapter->tx_scrq))
 		return;
-
+	// TODO memleak?
 	if (!zalloc_cpumask_var(&mask, GFP_KERNEL)) {
 		ibmvnic_clean_affinity(adapter);
 		return;
@@ -242,8 +245,11 @@ static void ibmvnic_set_affinity(struct ibmvnic_adapter *adapter)
 	num_rxqs = adapter->num_active_rx_scrqs;
 	total_queues = num_rxqs + num_txqs;
 	num_cpu = num_online_cpus();
+	// num cpu assigned per irq
 	stride = max_t(int, num_cpu / total_queues, 1);
+	// number of leftover cpu's
 	stragglers = num_cpu >= total_queues ? num_cpu % total_queues : 0;
+	// next available cpu id
 	cpu = cpumask_next(-1, cpu_online_mask);
 
 	for (i = 0; i < total_queues; i++) {
@@ -257,15 +263,20 @@ static void ibmvnic_set_affinity(struct ibmvnic_adapter *adapter)
 		}
 		if (!(queue && queue->irq))
 			continue;
+		// give an extra cpu to the irq if we have stragglers, only occurs straglers number of times
 		group_size = stride + (i < stragglers ? 1 : 0);
 		for (j = 0; j < group_size; j++) {
 			cpumask_set_cpu(cpu, mask);
 			cpu = cpumask_next_wrap(cpu, cpu_online_mask,
 						nr_cpu_ids, false);
 		}
+		// once here mask should be ready to assign
+		// atomically write is safer than writing bit by bit
 		/* set queue affinity mask */
 		cpumask_copy(queue->affinity_mask, mask);
+		// TODO deprecated
 		rc = irq_set_affinity_hint(queue->irq, queue->affinity_mask);
+		// TODO in testing make test case conditional purposley fail here
 		if (rc) {
 			netdev_warn(adapter->netdev,
 				    "%s: Set affinity failed, queue addr = %p, IRQ = %d, rc = %d.\n",
@@ -273,6 +284,9 @@ static void ibmvnic_set_affinity(struct ibmvnic_adapter *adapter)
 			break;
 		}
 		if (is_txq) {
+			// TODO formatting
+			// TDOO what does this do
+			// virtio does this
 			rc = __netif_set_xps_queue(adapter->netdev,
 									   cpumask_bits(queue->affinity_mask), i, XPS_CPUS);
 			if (rc) {
@@ -293,6 +307,7 @@ static int ibmvnic_cpu_online(unsigned int cpu, struct hlist_node *node)
 	struct ibmvnic_adapter *adapter;
 
 	adapter = hlist_entry_safe(node, struct ibmvnic_adapter, node);
+	// TODO is lock held?
 	ibmvnic_set_affinity(adapter);
 	return 0;
 }
@@ -3654,7 +3669,8 @@ static void ibmvnic_get_strings(struct net_device *dev, u32 stringset, u8 *data)
 
 	for (i = 0; i < ARRAY_SIZE(ibmvnic_stats); i++, data += ETH_GSTRING_LEN)
 		memcpy(data, ibmvnic_stats[i].name, ETH_GSTRING_LEN);
-
+	// TODO why, this removes affinity
+	// ethtool -S <device name>
 	ibmvnic_clean_affinity(adapter);
 	for (i = 0; i < adapter->req_tx_queues; i++) {
 		snprintf(data, ETH_GSTRING_LEN, "tx%d_packets", i);
