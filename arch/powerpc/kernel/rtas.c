@@ -947,6 +947,8 @@ void __noreturn rtas_halt(void)
 
 /* Must be in the RMO region, so we place it here */
 static char rtas_os_term_buf[2048];
+static s32 ibm_os_term_token = RTAS_UNKNOWN_SERVICE;
+static bool ibm_extended_os_term;
 
 void rtas_os_term(char *str)
 {
@@ -958,14 +960,13 @@ void rtas_os_term(char *str)
 	 * this property may terminate the partition which we want to avoid
 	 * since it interferes with panic_timeout.
 	 */
-	if (RTAS_UNKNOWN_SERVICE == rtas_token("ibm,os-term") ||
-	    RTAS_UNKNOWN_SERVICE == rtas_token("ibm,extended-os-term"))
+	if (ibm_os_term_token == RTAS_UNKNOWN_SERVICE || !ibm_extended_os_term)
 		return;
 
 	snprintf(rtas_os_term_buf, 2048, "OS panic: %s", str);
 
 	do {
-		status = rtas_call(rtas_token("ibm,os-term"), 1, 1, NULL,
+		status = rtas_call(ibm_os_term_token, 1, 1, NULL,
 				   __pa(rtas_os_term_buf));
 	} while (rtas_busy_delay(status));
 
@@ -1334,6 +1335,13 @@ void __init rtas_initialize(void)
 	rtas.size = size;
 	no_entry = of_property_read_u32(rtas.dev, "linux,rtas-entry", &entry);
 	rtas.entry = no_entry ? rtas.base : entry;
+
+	/*
+	 * Discover these now to avoid device tree lookups in the
+	 * panic path.
+	 */
+	ibm_os_term_token = rtas_token("ibm,os-term");
+	ibm_extended_os_term = of_property_read_bool(rtas.dev, "ibm,extended-os-term");
 
 	/* If RTAS was found, allocate the RMO buffer for it and look for
 	 * the stop-self token if any
