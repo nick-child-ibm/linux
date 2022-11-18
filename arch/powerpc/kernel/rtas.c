@@ -38,6 +38,7 @@
 #include <asm/page.h>
 #include <asm/rtas.h>
 #include <asm/time.h>
+#include <asm/trace.h>
 #include <asm/udbg.h>
 
 enum rtas_function_flags {
@@ -525,6 +526,7 @@ void enter_rtas(unsigned long);
 static void do_enter_rtas(struct rtas_args *args)
 {
 	unsigned long msr;
+	const char *name = NULL;
 
 	/*
 	 * Make sure MSR[RI] is currently enabled as it will be forced later
@@ -537,9 +539,30 @@ static void do_enter_rtas(struct rtas_args *args)
 
 	hard_irq_disable(); /* Ensure MSR[EE] is disabled on PPC64 */
 
+	if ((trace_rtas_input_enabled() || trace_rtas_output_enabled())) {
+		/*
+		 * rtas_token_to_function() uses xarray which uses RCU,
+		 * but this code can run in the CPU offline path
+		 * (e.g. stop-self), after it's become invalid to call
+		 * RCU APIs.
+		 */
+		if (cpu_online(smp_processor_id())) {
+			const s32 token = be32_to_cpu(args->token);
+			const struct rtas_function *func = rtas_token_to_function(token);
+
+			name = func->name;
+		}
+	}
+
+	trace_rtas_input(args, name);
+	trace_rtas_ll_entry(args);
+
 	enter_rtas(__pa(args));
 
 	srr_regs_clobbered(); /* rtas uses SRRs, invalidate */
+
+	trace_rtas_ll_exit(args);
+	trace_rtas_output(args, name);
 }
 
 struct rtas_t rtas = {
