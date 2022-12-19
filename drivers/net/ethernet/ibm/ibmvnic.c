@@ -3712,17 +3712,16 @@ static int ibmvnic_get_sset_count(struct net_device *dev, int sset)
 	}
 }
 
-static void ibmvnic_get_ethtool_stats(struct net_device *dev,
-				      struct ethtool_stats *stats, u64 *data)
+static int ibmvnic_request_statistics(struct ibmvnic_adapter *adapter,
+				      u8 flags)
 {
-	struct ibmvnic_adapter *adapter = netdev_priv(dev);
 	union ibmvnic_crq crq;
-	int i, j;
 	int rc;
 
 	memset(&crq, 0, sizeof(crq));
 	crq.request_statistics.first = IBMVNIC_CRQ_CMD;
 	crq.request_statistics.cmd = REQUEST_STATISTICS;
+	crq.request_statistics.flags |= flags;
 	crq.request_statistics.ioba = cpu_to_be32(adapter->stats_token);
 	crq.request_statistics.len =
 	    cpu_to_be32(sizeof(struct ibmvnic_statistics));
@@ -3731,10 +3730,23 @@ static void ibmvnic_get_ethtool_stats(struct net_device *dev,
 	reinit_completion(&adapter->stats_done);
 	rc = ibmvnic_send_crq(adapter, &crq);
 	if (rc)
+		return rc;
+	return ibmvnic_wait_for_completion(adapter, &adapter->stats_done,
+					   10000);
+}
+
+static void ibmvnic_get_ethtool_stats(struct net_device *dev,
+				      struct ethtool_stats *stats, u64 *data)
+{
+	struct ibmvnic_adapter *adapter = netdev_priv(dev);
+	int rc, i, j;
+
+	rc = ibmvnic_request_statistics(adapter, 0);
+	if (rc) {
+		netdev_err(dev, "Failed to request statistics from FW, %d\n",
+			   rc);
 		return;
-	rc = ibmvnic_wait_for_completion(adapter, &adapter->stats_done, 10000);
-	if (rc)
-		return;
+	}
 
 	for (i = 0; i < ARRAY_SIZE(ibmvnic_stats); i++)
 		data[i] = be64_to_cpu(IBMVNIC_GET_STAT

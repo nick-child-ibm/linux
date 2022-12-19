@@ -183,6 +183,11 @@ struct ibmvnic_fw_trace_entry {
 	__be64 trace_data[5];
 } __packed __aligned(8);
 
+enum req_vnic_stats_flags {
+	GET_PHYSICAL_PORT_STATS = 1 << 7, /* if unset, get logical port stats */
+	CLEAR_STATS = 1 << 6,		/* if unset, stats are not cleared */
+};
+
 struct ibmvnic_statistics {
 	__be32 version;
 	__be32 promiscuous;
