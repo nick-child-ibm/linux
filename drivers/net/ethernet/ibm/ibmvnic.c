@@ -114,6 +114,8 @@ static void ibmvnic_tx_scrq_clean_buffer(struct ibmvnic_adapter *adapter,
 static void free_long_term_buff(struct ibmvnic_adapter *adapter,
 				struct ibmvnic_long_term_buff *ltb);
 static void ibmvnic_disable_irqs(struct ibmvnic_adapter *adapter);
+static int ibmvnic_request_statistics(struct ibmvnic_adapter *adapter,
+				      u8 flags);
 
 struct ibmvnic_stat {
 	char name[ETH_GSTRING_LEN];
@@ -1878,6 +1880,12 @@ static int ibmvnic_open(struct net_device *netdev)
 		rc = init_resources(adapter);
 		if (rc) {
 			netdev_err(netdev, "failed to initialize resources\n");
+			goto out;
+		}
+		/* clear FW stats so we start fresh */
+		rc = ibmvnic_request_statistics(adapter, CLEAR_STATS);
+		if (rc) {
+			netdev_err(netdev, "failed to clear FW stats\n");
 			goto out;
 		}
 	}
