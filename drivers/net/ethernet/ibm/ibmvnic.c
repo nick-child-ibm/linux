@@ -3422,6 +3422,8 @@ restart_poll:
 		remove_buff_from_pool(adapter, rx_buff);
 
 		skb_put(skb, length);
+		length = skb->len;
+
 		skb->protocol = eth_type_trans(skb, netdev);
 		skb_record_rx_queue(skb, scrq_num);
 
@@ -3430,7 +3432,6 @@ restart_poll:
 			skb->ip_summed = CHECKSUM_UNNECESSARY;
 		}
 
-		length = skb->len;
 		napi_gro_receive(napi, skb); /* send it up */
 		netdev->stats.rx_packets++;
 		netdev->stats.rx_bytes += length;
