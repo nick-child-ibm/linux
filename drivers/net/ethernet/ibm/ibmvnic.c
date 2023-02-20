@@ -3645,8 +3645,27 @@ static void ibmvnic_get_channels(struct net_device *netdev,
 				 struct ethtool_channels *channels)
 {
 	struct ibmvnic_adapter *adapter = netdev_priv(netdev);
+    union ibmvnic_crq crq;
 
-	channels->max_rx = adapter->max_rx_queues;
+    WARN_ON(atomic_read(&adapter->running_cap_crqs) != 0);
+    memset(&crq, 0, sizeof(crq));
+	crq.query_capability.first = IBMVNIC_CRQ_CMD;
+	crq.query_capability.cmd = QUERY_CAPABILITY;
+
+    crq.query_capability.capability = cpu_to_be16(MAX_TX_QUEUES);
+	ibmvnic_send_crq(adapter, &crq);
+
+	crq.query_capability.capability = cpu_to_be16(MAX_RX_QUEUES);
+	ibmvnic_send_crq(adapter, &crq);
+	
+    // The response will decrement running_cap_crqs, if this value
+    // is zero then it will trigger a req_cap. We don't want that
+    while(atomic_read(&adapter->running_cap_crqs) != -2) {
+        msleep(10);
+    };
+    atomic_set(&adapter->running_cap_crqs, 0);
+
+    channels->max_rx = adapter->max_rx_queues;
 	channels->max_tx = adapter->max_tx_queues;
 	channels->max_other = 0;
 	channels->max_combined = 0;
