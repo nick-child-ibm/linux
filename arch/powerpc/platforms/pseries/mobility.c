@@ -81,6 +81,42 @@ device_initcall(register_nmi_wd_lpm_factor_sysctl);
 #endif /* CONFIG_SYSCTL */
 #endif /* CONFIG_PPC_WATCHDOG */
 
+struct ppc_mobility_state {
+	unsigned long state;
+	struct blocking_notifier_head notify_head;
+} mobility_state = {
+	.state = -1,
+	.notify_head = BLOCKING_NOTIFIER_INIT(mobility_state.notify_head)
+};
+
+/* add new subscriber */
+int pseries_mobility_notify_reg(struct notifier_block *nb)
+{
+	return blocking_notifier_chain_register(&mobility_state.notify_head,
+						nb);
+}
+EXPORT_SYMBOL_GPL(pseries_mobility_notify_reg);
+
+
+/* remove subscriber */
+int pseries_mobility_notify_unreg(struct notifier_block *nb)
+{
+	return blocking_notifier_chain_unregister(&mobility_state.notify_head,
+						  nb);
+}
+EXPORT_SYMBOL_GPL(pseries_mobility_notify_unreg);
+
+/* notify subscribers */
+static void pseries_mobility_notify_call(unsigned long new_status)
+{
+	/* only notify on state change */
+	if (new_status == mobility_state.state)
+		return;
+	mobility_state.state = new_status;
+	blocking_notifier_call_chain(&mobility_state.notify_head,
+				     mobility_state.state, NULL);
+}
+
 static int mobility_rtas_call(int token, char *buf, s32 scope)
 {
 	int rc;
@@ -400,7 +436,7 @@ void post_mobility_fixup(void)
 	return;
 }
 
-static int poll_vasi_state(u64 handle, unsigned long *res)
+static int poll_vasi_state(u64 handle)
 {
 	unsigned long retbuf[PLPAR_HCALL_BUFSIZE];
 	long hvrc;
@@ -410,7 +446,7 @@ static int poll_vasi_state(u64 handle, unsigned long *res)
 	switch (hvrc) {
 	case H_SUCCESS:
 		ret = 0;
-		*res = retbuf[0];
+		pseries_mobility_notify_call(retbuf[0]);
 		break;
 	case H_PARAMETER:
 		ret = -EINVAL;
@@ -429,7 +465,6 @@ static int poll_vasi_state(u64 handle, unsigned long *res)
 
 static int wait_for_vasi_session_suspending(u64 handle)
 {
-	unsigned long state;
 	int ret;
 
 	/*
@@ -437,14 +472,15 @@ static int wait_for_vasi_session_suspending(u64 handle)
 	 * H_VASI_SUSPENDING. Treat anything else as an error.
 	 */
 	while (true) {
-		ret = poll_vasi_state(handle, &state);
+		ret = poll_vasi_state(handle);
 
-		if (ret != 0 || state == H_VASI_SUSPENDING) {
+		if (ret != 0 || mobility_state.state == H_VASI_SUSPENDING) {
 			break;
-		} else if (state == H_VASI_ENABLED) {
+		} else if (mobility_state.state == H_VASI_ENABLED) {
 			ssleep(1);
 		} else {
-			pr_err("unexpected H_VASI_STATE result %lu\n", state);
+			pr_err("unexpected H_VASI_STATE result %lu\n",
+				mobility_state.state);
 			ret = -EIO;
 			break;
 		}
@@ -462,7 +498,6 @@ static int wait_for_vasi_session_suspending(u64 handle)
 
 static void wait_for_vasi_session_completed(u64 handle)
 {
-	unsigned long state = 0;
 	int ret;
 
 	pr_info("waiting for memory transfer to complete...\n");
@@ -471,14 +506,15 @@ static void wait_for_vasi_session_completed(u64 handle)
 	 * Wait for transition from H_VASI_RESUMED to H_VASI_COMPLETED.
 	 */
 	while (true) {
-		ret = poll_vasi_state(handle, &state);
+		ret = poll_vasi_state(handle);
 
 		/*
 		 * If the memory transfer is already complete and the migration
 		 * has been cleaned up by the hypervisor, H_PARAMETER is return,
 		 * which is translate in EINVAL by poll_vasi_state().
 		 */
-		if (ret == -EINVAL || (!ret && state == H_VASI_COMPLETED)) {
+		if (ret == -EINVAL
+		    || (!ret && mobility_state.state == H_VASI_COMPLETED)) {
 			pr_info("memory transfer completed.\n");
 			break;
 		}
@@ -488,8 +524,9 @@ static void wait_for_vasi_session_completed(u64 handle)
 			break;
 		}
 
-		if (state != H_VASI_RESUMED) {
-			pr_err("unexpected H_VASI_STATE result %lu\n", state);
+		if (mobility_state.state != H_VASI_RESUMED) {
+			pr_err("unexpected H_VASI_STATE result %lu\n",
+				mobility_state.state);
 			break;
 		}
 
@@ -683,7 +720,6 @@ static int pseries_suspend(u64 handle)
 
 	while (true) {
 		struct pseries_suspend_info info;
-		unsigned long vasi_state;
 		int vasi_err;
 
 		info = (struct pseries_suspend_info) {
@@ -712,11 +748,11 @@ static int pseries_suspend(u64 handle)
 		if (attempt == max_attempts)
 			break;
 
-		vasi_err = poll_vasi_state(handle, &vasi_state);
+		vasi_err = poll_vasi_state(handle);
 		if (vasi_err == 0) {
-			if (vasi_state != H_VASI_SUSPENDING) {
+			if (mobility_state.state != H_VASI_SUSPENDING) {
 				pr_notice("VASI state %lu after failed suspend\n",
-					  vasi_state);
+					  mobility_state.state);
 				break;
 			}
 		} else if (vasi_err != -EOPNOTSUPP) {

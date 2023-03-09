@@ -124,4 +124,8 @@ static inline void pseries_lpar_read_hblkrm_characteristics(void) { }
 
 void pseries_rng_init(void);
 
+/* Mobility notification chain functions */
+int pseries_mobility_notify_reg(struct notifier_block *nb);
+int pseries_mobility_notify_unreg(struct notifier_block *nb);
+
 #endif /* _PSERIES_PSERIES_H */
