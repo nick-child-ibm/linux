@@ -35,7 +35,8 @@
 #include <asm/firmware.h>
 #include <net/tcp.h>
 #include <net/ip6_checksum.h>
-
+#include <linux/completion.h>
+#include <platforms/pseries/pseries.h>
 #include "ibmveth.h"
 
 static irqreturn_t ibmveth_interrupt(int irq, void *dev_instance);
@@ -644,6 +645,8 @@ static int ibmveth_open(struct net_device *netdev)
 
 	netif_tx_start_all_queues(netdev);
 
+	pseries_mobility_notify_reg(&adapter->migrate_nb);
+
 	netdev_dbg(netdev, "open complete\n");
 
 	return 0;
@@ -687,6 +690,10 @@ static int ibmveth_close(struct net_device *netdev)
 	int i;
 
 	netdev_dbg(netdev, "close starting\n");
+
+	pseries_mobility_notify_unreg(&adapter->migrate_nb);
+	if (!completion_done(&adapter->migrate_done))
+		complete_all(&adapter->migrate_done);
 
 	napi_disable(&adapter->napi);
 
@@ -1647,6 +1654,43 @@ static const struct net_device_ops ibmveth_netdev_ops = {
 #endif
 };
 
+static void ibmveth_post_migrate_arps(struct work_struct *work)
+{
+	struct ibmveth_adapter *adapter = container_of(work,
+						       struct ibmveth_adapter,
+						       send_post_migrate_arps.work);
+	struct net_device *netdev = adapter->netdev;
+
+	if (!(netdev->flags & IFF_UP) ||
+	    completion_done(&adapter->migrate_done))
+		return;
+
+	netdev_dbg(netdev, "sending GARPs after migration\n");
+	netdev_notify_peers(netdev);
+	queue_delayed_work(system_long_wq, &adapter->send_post_migrate_arps,
+			   100);
+}
+
+static int ibmveth_migrate_handler(struct notifier_block *nb,
+				   unsigned long status, void *x)
+{
+	struct ibmveth_adapter *adapter = container_of(nb,
+						       struct ibmveth_adapter,
+						       migrate_nb);
+	switch (status) {
+	case H_VASI_RESUMED:
+		reinit_completion(&adapter->migrate_done);
+		/* direct call to ensure at least one G ARP is sent */
+		ibmveth_post_migrate_arps(&adapter->send_post_migrate_arps.work);
+		break;
+	case H_VASI_COMPLETED:
+		if (!completion_done(&adapter->migrate_done))
+			complete(&adapter->migrate_done);
+		break;
+	}
+	return NOTIFY_DONE;
+}
+
 static int ibmveth_probe(struct vio_dev *dev, const struct vio_device_id *id)
 {
 	int rc, i, mac_len;
@@ -1694,6 +1738,10 @@ static int ibmveth_probe(struct vio_dev *dev, const struct vio_device_id *id)
 	adapter->vdev = dev;
 	adapter->netdev = netdev;
 	adapter->mcastFilterSize = be32_to_cpu(*mcastFilterSize_p);
+	adapter->migrate_nb.notifier_call = ibmveth_migrate_handler;
+	INIT_DELAYED_WORK(&adapter->send_post_migrate_arps,
+			  ibmveth_post_migrate_arps);
+	init_completion(&adapter->migrate_done);
 	ibmveth_init_link_settings(netdev);
 
 	netif_napi_add_weight(netdev, &adapter->napi, ibmveth_poll, 16);

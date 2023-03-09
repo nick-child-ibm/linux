@@ -147,6 +147,9 @@ struct ibmveth_adapter {
     dma_addr_t filter_list_dma;
     struct ibmveth_buff_pool rx_buff_pool[IBMVETH_NUM_BUFF_POOLS];
     struct ibmveth_rx_q rx_queue;
+    struct notifier_block migrate_nb;
+    struct completion migrate_done;
+    struct delayed_work send_post_migrate_arps;
     int rx_csum;
     int large_send;
     bool is_active_trunk;
