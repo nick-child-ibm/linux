@@ -2482,6 +2482,13 @@ static inline
 struct netdev_queue *netdev_get_tx_queue(const struct net_device *dev,
 					 unsigned int index)
 {
+	if (unlikely(index >= dev->num_tx_queues)) {
+		net_warn_ratelimited("%s selects TX queue %d, but number of TX queues is %d\n",
+				     dev->name, index,
+				     dev->num_tx_queues);
+		return &dev->_tx[0];
+	}
+
 	return &dev->_tx[index];
 }
 
