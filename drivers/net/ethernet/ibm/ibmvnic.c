@@ -69,6 +69,7 @@
 #include <linux/if_vlan.h>
 #include <linux/utsname.h>
 #include <linux/cpu.h>
+#include <net/sch_generic.h>
 
 #include "ibmvnic.h"
 
@@ -2858,7 +2859,7 @@ static int do_reset(struct ibmvnic_adapter *adapter,
 
 	if (adapter->reset_reason == VNIC_RESET_FAILOVER ||
 	    adapter->reset_reason == VNIC_RESET_MOBILITY)
-		__netdev_notify_peers(netdev);
+		queue_work(system_long_wq, &adapter->ibmvnic_notify_peers);
 
 	rc = 0;
 
@@ -2945,7 +2946,7 @@ static int do_hard_reset(struct ibmvnic_adapter *adapter,
 		goto out;
 	}
 
-	__netdev_notify_peers(netdev);
+	queue_work(system_long_wq, &adapter->ibmvnic_notify_peers);
 out:
 	/* restore adapter state if reset failed */
 	if (rc)
@@ -3043,6 +3044,33 @@ init_failed:
 out:
 	adapter->state = VNIC_DOWN;
 	return rc;
+}
+
+static void __ibmvnic_notify_peers(struct work_struct *work)
+{
+	struct ibmvnic_adapter *adapter;
+
+	adapter = container_of(work, struct ibmvnic_adapter,
+			       ibmvnic_notify_peers);
+	if ((!adapter->netdev->flags & IFF_UP) ||
+	    !netif_carrier_ok(adapter->netdev))
+		return;
+
+	/* When we set carrier off, a linkwatch notification triggers
+	 * a call to dev_deactivate which assigns the qdisc to noop_qdisc.
+	 * Similarly, a carrier on event will reassign a valid qdisc.
+	 * Since this is all scheduled work, we do not want to attempt to
+	 * send any ARPs when noop_disc is still set.
+	 */
+	if (rtnl_dereference(netdev_get_tx_queue(adapter->netdev, 0)->qdisc)
+	    == &noop_qdisc) {
+		netdev_dbg(adapter->netdev, "Rescheduling ibmvnic_notify_peers\n");
+		queue_work(system_long_wq, work);
+		return;
+	}
+
+	netdev_dbg(adapter->netdev, "Notifying peers\n");
+	netdev_notify_peers(adapter->netdev);
 }
 
 static void __ibmvnic_reset(struct work_struct *work)
@@ -6261,6 +6289,7 @@ static int ibmvnic_probe(struct vio_dev *dev, const struct vio_device_id *id)
 	SET_NETDEV_DEV(netdev, &dev->dev);
 
 	INIT_WORK(&adapter->ibmvnic_reset, __ibmvnic_reset);
+	INIT_WORK(&adapter->ibmvnic_notify_peers, __ibmvnic_notify_peers);
 	INIT_DELAYED_WORK(&adapter->ibmvnic_delayed_reset,
 			  __ibmvnic_delayed_reset);
 	INIT_LIST_HEAD(&adapter->rwi_list);
@@ -6422,6 +6451,7 @@ static void ibmvnic_remove(struct vio_dev *dev)
 	ibmvnic_cpu_notif_remove(adapter);
 
 	flush_work(&adapter->ibmvnic_reset);
+	flush_work(&adapter->ibmvnic_notify_peers);
 	flush_delayed_work(&adapter->ibmvnic_delayed_reset);
 
 	rtnl_lock();

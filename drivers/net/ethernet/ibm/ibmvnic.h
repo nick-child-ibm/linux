@@ -1049,6 +1049,7 @@ struct ibmvnic_adapter {
 	 */
 	spinlock_t rwi_lock;
 	struct work_struct ibmvnic_reset;
+	struct work_struct ibmvnic_notify_peers;
 	struct delayed_work ibmvnic_delayed_reset;
 	unsigned long resetting;
 	/* last device reset time */
