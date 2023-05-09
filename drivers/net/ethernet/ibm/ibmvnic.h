@@ -915,6 +915,16 @@ struct ibmvnic_tunables {
 	u64 mtu;
 };
 
+struct ibmvnic_login_attempt {
+	struct ibmvnic_login_buffer *login_buf;
+	dma_addr_t login_buf_token;
+	int login_buf_sz;
+
+	struct ibmvnic_login_rsp_buffer *login_rsp_buf;
+	dma_addr_t login_rsp_buf_token;
+	int login_rsp_buf_sz;
+};
+
 struct ibmvnic_adapter {
 	struct vio_dev *vdev;
 	struct net_device *netdev;
@@ -951,13 +961,7 @@ struct ibmvnic_adapter {
 	u8 duplex;
 
 	/* login data */
-	struct ibmvnic_login_buffer *login_buf;
-	dma_addr_t login_buf_token;
-	int login_buf_sz;
-
-	struct ibmvnic_login_rsp_buffer *login_rsp_buf;
-	dma_addr_t login_rsp_buf_token;
-	int login_rsp_buf_sz;
+	struct ibmvnic_login_attempt *login;
 
 	atomic_t running_cap_crqs;
 

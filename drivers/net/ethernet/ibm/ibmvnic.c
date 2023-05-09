@@ -1586,25 +1586,34 @@ static int ibmvnic_login(struct net_device *netdev)
 	return 0;
 }
 
-static void release_login_buffer(struct ibmvnic_adapter *adapter)
+static void release_login_buffer(struct ibmvnic_login_attempt *login)
 {
-	kfree(adapter->login_buf);
-	adapter->login_buf = NULL;
+	kfree(login->login_buf);
+	login->login_buf = NULL;
 }
 
-static void release_login_rsp_buffer(struct ibmvnic_adapter *adapter)
+static void release_login_rsp_buffer(struct ibmvnic_login_attempt *login)
 {
-	kfree(adapter->login_rsp_buf);
-	adapter->login_rsp_buf = NULL;
+	kfree(login->login_rsp_buf);
+	login->login_rsp_buf = NULL;
 }
 
+static void release_one_login_attempt(struct ibmvnic_adapter *adapter)
+{
+	if (!adapter->login)
+		return;
+
+	release_login_buffer(adapter->login);
+	release_login_rsp_buffer(adapter->login);
+	kfree(adapter->login);
+	adapter->login = NULL;
+}
 static void release_resources(struct ibmvnic_adapter *adapter)
 {
 	release_vpd_data(adapter);
 
 	release_napi(adapter);
-	release_login_buffer(adapter);
-	release_login_rsp_buffer(adapter);
+	release_one_login_attempt(adapter);
 }
 
 static int set_link_state(struct ibmvnic_adapter *adapter, u8 link_state)
@@ -4699,6 +4708,7 @@ static void vnic_add_client_data(struct ibmvnic_adapter *adapter,
 
 static int send_login(struct ibmvnic_adapter *adapter)
 {
+	struct ibmvnic_login_attempt *login_attempt;
 	struct ibmvnic_login_rsp_buffer *login_rsp_buffer;
 	struct ibmvnic_login_buffer *login_buffer;
 	struct device *dev = &adapter->vdev->dev;
@@ -4720,8 +4730,8 @@ static int send_login(struct ibmvnic_adapter *adapter)
 		return -ENOMEM;
 	}
 
-	release_login_buffer(adapter);
-	release_login_rsp_buffer(adapter);
+	/* free any old login attempts */
+	release_one_login_attempt(adapter);
 
 	client_data_len = vnic_client_data_len(adapter);
 
@@ -4758,12 +4768,17 @@ static int send_login(struct ibmvnic_adapter *adapter)
 		goto buf_rsp_map_failed;
 	}
 
-	adapter->login_buf = login_buffer;
-	adapter->login_buf_token = buffer_token;
-	adapter->login_buf_sz = buffer_size;
-	adapter->login_rsp_buf = login_rsp_buffer;
-	adapter->login_rsp_buf_token = rsp_buffer_token;
-	adapter->login_rsp_buf_sz = rsp_buffer_size;
+	login_attempt = kmalloc(sizeof(*login_attempt), GFP_ATOMIC);
+	if (!login_attempt)
+		goto login_entry_alloc_failed;
+
+	login_attempt->login_buf = login_buffer;
+	login_attempt->login_buf_token = buffer_token;
+	login_attempt->login_buf_sz = buffer_size;
+	login_attempt->login_rsp_buf = login_rsp_buffer;
+	login_attempt->login_rsp_buf_token = rsp_buffer_token;
+	login_attempt->login_rsp_buf_sz = rsp_buffer_size;
+	adapter->login = login_attempt;
 
 	login_buffer->len = cpu_to_be32(buffer_size);
 	login_buffer->version = cpu_to_be32(INITIAL_VERSION_LB);
@@ -4807,9 +4822,9 @@ static int send_login(struct ibmvnic_adapter *adapter)
 	vnic_add_client_data(adapter, vlcd);
 
 	netdev_dbg(adapter->netdev, "Login Buffer:\n");
-	for (i = 0; i < (adapter->login_buf_sz - 1) / 8 + 1; i++) {
+	for (i = 0; i < (buffer_size - 1) / 8 + 1; i++) {
 		netdev_dbg(adapter->netdev, "%016lx\n",
-			   ((unsigned long *)(adapter->login_buf))[i]);
+			   ((unsigned long *)(login_buffer))[i]);
 	}
 
 	memset(&crq, 0, sizeof(crq));
@@ -4823,19 +4838,22 @@ static int send_login(struct ibmvnic_adapter *adapter)
 	if (rc) {
 		adapter->login_pending = false;
 		netdev_err(adapter->netdev, "Failed to send login, rc=%d\n", rc);
-		goto buf_rsp_map_failed;
+		goto crq_send_fail;
 	}
 
 	return 0;
 
+crq_send_fail:
+	kfree(login_attempt);
+	adapter->login = NULL;
+login_entry_alloc_failed:
+	dma_unmap_single(dev, rsp_buffer_token, rsp_buffer_size, DMA_TO_DEVICE);
 buf_rsp_map_failed:
 	kfree(login_rsp_buffer);
-	adapter->login_rsp_buf = NULL;
 buf_rsp_alloc_failed:
 	dma_unmap_single(dev, buffer_token, buffer_size, DMA_TO_DEVICE);
 buf_map_failed:
 	kfree(login_buffer);
-	adapter->login_buf = NULL;
 buf_alloc_failed:
 	return -ENOMEM;
 }
@@ -5382,9 +5400,10 @@ static int handle_login_rsp(union ibmvnic_crq *login_rsp_crq,
 {
 	struct device *dev = &adapter->vdev->dev;
 	struct net_device *netdev = adapter->netdev;
-	struct ibmvnic_login_rsp_buffer *login_rsp = adapter->login_rsp_buf;
-	struct ibmvnic_login_buffer *login = adapter->login_buf;
-	u32 rsp_len = be32_to_cpu(login_rsp->len);
+	struct ibmvnic_login_attempt *login_attempt = adapter->login;
+	struct ibmvnic_login_rsp_buffer *login_rsp;
+	struct ibmvnic_login_buffer *login;
+	u32 rsp_len;
 	u64 *tx_handle_array;
 	u64 *rx_handle_array;
 	int num_tx_pools;
@@ -5401,10 +5420,18 @@ static int handle_login_rsp(union ibmvnic_crq *login_rsp_crq,
 	}
 	adapter->login_pending = false;
 
-	dma_unmap_single(dev, adapter->login_buf_token, adapter->login_buf_sz,
-			 DMA_TO_DEVICE);
-	dma_unmap_single(dev, adapter->login_rsp_buf_token,
-			 adapter->login_rsp_buf_sz, DMA_FROM_DEVICE);
+	if (!login_attempt) {
+		netdev_warn(netdev, "Received LOGIN_RSP but no login entry allocated\n");
+		return 0;
+	}
+	login_rsp = login_attempt->login_rsp_buf;
+	login = login_attempt->login_buf;
+	rsp_len = be32_to_cpu(login_rsp->len);
+
+	dma_unmap_single(dev, login_attempt->login_buf_token,
+			 login_attempt->login_buf_sz, DMA_TO_DEVICE);
+	dma_unmap_single(dev, login_attempt->login_rsp_buf_token,
+			 login_attempt->login_rsp_buf_sz, DMA_FROM_DEVICE);
 
 	/* If the number of queues requested can't be allocated by the
 	 * server, the login response will return with code 1. We will need
@@ -5427,9 +5454,9 @@ static int handle_login_rsp(union ibmvnic_crq *login_rsp_crq,
 	netdev->mtu = adapter->req_mtu - ETH_HLEN;
 
 	netdev_dbg(adapter->netdev, "Login Response Buffer:\n");
-	for (i = 0; i < (adapter->login_rsp_buf_sz - 1) / 8 + 1; i++) {
+	for (i = 0; i < (login_attempt->login_rsp_buf_sz - 1) / 8 + 1; i++) {
 		netdev_dbg(adapter->netdev, "%016lx\n",
-			   ((unsigned long *)(adapter->login_rsp_buf))[i]);
+			   ((unsigned long *)(login_rsp))[i]);
 	}
 
 	/* Sanity checks */
@@ -5456,20 +5483,20 @@ static int handle_login_rsp(union ibmvnic_crq *login_rsp_crq,
 		return -EIO;
 	}
 
-	size_array = (u64 *)((u8 *)(adapter->login_rsp_buf) +
-		be32_to_cpu(adapter->login_rsp_buf->off_rxadd_buff_size));
+	size_array = (u64 *)((u8 *)(login_rsp) +
+		be32_to_cpu(login_rsp->off_rxadd_buff_size));
 	/* variable buffer sizes are not supported, so just read the
 	 * first entry.
 	 */
 	adapter->cur_rx_buf_sz = be64_to_cpu(size_array[0]);
 
-	num_tx_pools = be32_to_cpu(adapter->login_rsp_buf->num_txsubm_subcrqs);
-	num_rx_pools = be32_to_cpu(adapter->login_rsp_buf->num_rxadd_subcrqs);
+	num_tx_pools = be32_to_cpu(login_rsp->num_txsubm_subcrqs);
+	num_rx_pools = be32_to_cpu(login_rsp->num_rxadd_subcrqs);
 
-	tx_handle_array = (u64 *)((u8 *)(adapter->login_rsp_buf) +
-				  be32_to_cpu(adapter->login_rsp_buf->off_txsubm_subcrqs));
-	rx_handle_array = (u64 *)((u8 *)(adapter->login_rsp_buf) +
-				  be32_to_cpu(adapter->login_rsp_buf->off_rxadd_subcrqs));
+	tx_handle_array = (u64 *)((u8 *)(login_rsp) +
+				  be32_to_cpu(login_rsp->off_txsubm_subcrqs));
+	rx_handle_array = (u64 *)((u8 *)(login_rsp) +
+				  be32_to_cpu(login_rsp->off_rxadd_subcrqs));
 
 	for (i = 0; i < num_tx_pools; i++)
 		adapter->tx_scrq[i]->handle = tx_handle_array[i];
@@ -5479,8 +5506,7 @@ static int handle_login_rsp(union ibmvnic_crq *login_rsp_crq,
 
 	adapter->num_active_tx_scrqs = num_tx_pools;
 	adapter->num_active_rx_scrqs = num_rx_pools;
-	release_login_rsp_buffer(adapter);
-	release_login_buffer(adapter);
+	release_one_login_attempt(adapter);
 	complete(&adapter->init_done);
 
 	return 0;
