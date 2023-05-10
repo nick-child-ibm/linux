@@ -923,6 +923,8 @@ struct ibmvnic_login_attempt {
 	struct ibmvnic_login_rsp_buffer *login_rsp_buf;
 	dma_addr_t login_rsp_buf_token;
 	int login_rsp_buf_sz;
+
+	struct list_head list;
 };
 
 struct ibmvnic_adapter {
@@ -961,7 +963,7 @@ struct ibmvnic_adapter {
 	u8 duplex;
 
 	/* login data */
-	struct ibmvnic_login_attempt *login;
+	struct list_head login_list;
 
 	atomic_t running_cap_crqs;
 
@@ -1060,7 +1062,6 @@ struct ibmvnic_adapter {
 
 	bool napi_enabled;
 	bool from_passive_init;
-	bool login_pending;
 	/* protected by rcu */
 	bool tx_queues_active;
 	bool failover_pending;

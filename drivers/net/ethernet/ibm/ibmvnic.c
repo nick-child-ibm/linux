@@ -1586,34 +1586,53 @@ static int ibmvnic_login(struct net_device *netdev)
 	return 0;
 }
 
-static void release_login_buffer(struct ibmvnic_login_attempt *login)
+static void release_login_buffer(struct ibmvnic_login_attempt *login,
+				 struct device *dev)
 {
+	dma_unmap_single(dev, login->login_buf_token, login->login_buf_sz,
+			 DMA_TO_DEVICE);
 	kfree(login->login_buf);
 	login->login_buf = NULL;
 }
 
-static void release_login_rsp_buffer(struct ibmvnic_login_attempt *login)
+static void release_login_rsp_buffer(struct ibmvnic_login_attempt *login,
+				     struct device *dev)
 {
+	dma_unmap_single(dev, login->login_rsp_buf_token,
+			 login->login_rsp_buf_sz, DMA_FROM_DEVICE);
 	kfree(login->login_rsp_buf);
 	login->login_rsp_buf = NULL;
 }
 
-static void release_one_login_attempt(struct ibmvnic_adapter *adapter)
+static void release_one_login_attempt(struct ibmvnic_login_attempt *login,
+				      struct ibmvnic_adapter *adapter)
 {
-	if (!adapter->login)
+	list_del(&login->list);
+	release_login_buffer(login, &adapter->vdev->dev);
+	release_login_rsp_buffer(login, &adapter->vdev->dev);
+	kfree(login);
+}
+
+static void release_all_login_attempts(struct ibmvnic_adapter *adapter)
+{
+	struct list_head *entry, *tmp_entry;
+
+	if (list_empty(&adapter->login_list))
 		return;
 
-	release_login_buffer(adapter->login);
-	release_login_rsp_buffer(adapter->login);
-	kfree(adapter->login);
-	adapter->login = NULL;
+	list_for_each_safe(entry, tmp_entry, &adapter->login_list) {
+		release_one_login_attempt(list_entry(entry,
+						     struct ibmvnic_login_attempt,
+						     list), adapter);
+	}
 }
+
 static void release_resources(struct ibmvnic_adapter *adapter)
 {
 	release_vpd_data(adapter);
 
 	release_napi(adapter);
-	release_one_login_attempt(adapter);
+	release_all_login_attempts(adapter);
 }
 
 static int set_link_state(struct ibmvnic_adapter *adapter, u8 link_state)
@@ -4730,9 +4749,6 @@ static int send_login(struct ibmvnic_adapter *adapter)
 		return -ENOMEM;
 	}
 
-	/* free any old login attempts */
-	release_one_login_attempt(adapter);
-
 	client_data_len = vnic_client_data_len(adapter);
 
 	buffer_size =
@@ -4768,6 +4784,14 @@ static int send_login(struct ibmvnic_adapter *adapter)
 		goto buf_rsp_map_failed;
 	}
 
+	/* Deliberate poisoning to ensure response is completely
+	 * filled out later on.
+	 */
+	login_rsp_buffer->off_txsubm_subcrqs = cpu_to_be32(UINT_MAX);
+	login_rsp_buffer->off_rxadd_subcrqs = cpu_to_be32(UINT_MAX);
+	login_rsp_buffer->off_rxadd_buff_size = cpu_to_be32(UINT_MAX);
+	login_rsp_buffer->off_supp_tx_desc = cpu_to_be32(UINT_MAX);
+
 	login_attempt = kmalloc(sizeof(*login_attempt), GFP_ATOMIC);
 	if (!login_attempt)
 		goto login_entry_alloc_failed;
@@ -4778,7 +4802,7 @@ static int send_login(struct ibmvnic_adapter *adapter)
 	login_attempt->login_rsp_buf = login_rsp_buffer;
 	login_attempt->login_rsp_buf_token = rsp_buffer_token;
 	login_attempt->login_rsp_buf_sz = rsp_buffer_size;
-	adapter->login = login_attempt;
+	list_add_tail(&login_attempt->list, &adapter->login_list);
 
 	login_buffer->len = cpu_to_be32(buffer_size);
 	login_buffer->version = cpu_to_be32(INITIAL_VERSION_LB);
@@ -4833,10 +4857,8 @@ static int send_login(struct ibmvnic_adapter *adapter)
 	crq.login.ioba = cpu_to_be32(buffer_token);
 	crq.login.len = cpu_to_be32(buffer_size);
 
-	adapter->login_pending = true;
 	rc = ibmvnic_send_crq(adapter, &crq);
 	if (rc) {
-		adapter->login_pending = false;
 		netdev_err(adapter->netdev, "Failed to send login, rc=%d\n", rc);
 		goto crq_send_fail;
 	}
@@ -4844,8 +4866,8 @@ static int send_login(struct ibmvnic_adapter *adapter)
 	return 0;
 
 crq_send_fail:
+	list_del(&login_attempt->list);
 	kfree(login_attempt);
-	adapter->login = NULL;
 login_entry_alloc_failed:
 	dma_unmap_single(dev, rsp_buffer_token, rsp_buffer_size, DMA_TO_DEVICE);
 buf_rsp_map_failed:
@@ -5400,8 +5422,9 @@ static int handle_login_rsp(union ibmvnic_crq *login_rsp_crq,
 {
 	struct device *dev = &adapter->vdev->dev;
 	struct net_device *netdev = adapter->netdev;
-	struct ibmvnic_login_attempt *login_attempt = adapter->login;
+	struct ibmvnic_login_attempt *login_attempt;
 	struct ibmvnic_login_rsp_buffer *login_rsp;
+	struct list_head *entry, *tmp_entry;
 	struct ibmvnic_login_buffer *login;
 	u32 rsp_len;
 	u64 *tx_handle_array;
@@ -5411,27 +5434,13 @@ static int handle_login_rsp(union ibmvnic_crq *login_rsp_crq,
 	u64 *size_array;
 	int i;
 
-	/* CHECK: Test/set of login_pending does not need to be atomic
+	/* CHECK: Test/set of empty login list does not need to be atomic
 	 * because only ibmvnic_tasklet tests/clears this.
 	 */
-	if (!adapter->login_pending) {
+	if (list_empty(&adapter->login_list)) {
 		netdev_warn(netdev, "Ignoring unexpected login response\n");
 		return 0;
 	}
-	adapter->login_pending = false;
-
-	if (!login_attempt) {
-		netdev_warn(netdev, "Received LOGIN_RSP but no login entry allocated\n");
-		return 0;
-	}
-	login_rsp = login_attempt->login_rsp_buf;
-	login = login_attempt->login_buf;
-	rsp_len = be32_to_cpu(login_rsp->len);
-
-	dma_unmap_single(dev, login_attempt->login_buf_token,
-			 login_attempt->login_buf_sz, DMA_TO_DEVICE);
-	dma_unmap_single(dev, login_attempt->login_rsp_buf_token,
-			 login_attempt->login_rsp_buf_sz, DMA_FROM_DEVICE);
 
 	/* If the number of queues requested can't be allocated by the
 	 * server, the login response will return with code 1. We will need
@@ -5439,6 +5448,7 @@ static int handle_login_rsp(union ibmvnic_crq *login_rsp_crq,
 	 */
 	if (login_rsp_crq->generic.rc.code) {
 		adapter->init_done_rc = login_rsp_crq->generic.rc.code;
+		release_all_login_attempts(adapter);
 		complete(&adapter->init_done);
 		return 0;
 	}
@@ -5446,42 +5456,60 @@ static int handle_login_rsp(union ibmvnic_crq *login_rsp_crq,
 	if (adapter->failover_pending) {
 		adapter->init_done_rc = -EAGAIN;
 		netdev_dbg(netdev, "Failover pending, ignoring login response\n");
+		release_all_login_attempts(adapter);
 		complete(&adapter->init_done);
-		/* login response buffer will be released on reset */
 		return 0;
 	}
 
+	/* If a login attempt times out then we send another. Eventually, when
+	 * we get a LOGIN_RSP, we don't know which login request it was for.
+	 * So, start at the most recent login attempt, test if it is fully
+	 * filled out, if not then try an older one
+	 */
+	list_for_each_prev_safe(entry, tmp_entry, &adapter->login_list) {
+		login_attempt = list_entry(entry, struct ibmvnic_login_attempt,
+					   list);
+		login_rsp = login_attempt->login_rsp_buf;
+		login = login_attempt->login_buf;
+		rsp_len = be32_to_cpu(login_rsp->len);
+
+		netdev_dbg(adapter->netdev, "Login Response Buffer:\n");
+		for (i = 0; i < (login_attempt->login_rsp_buf_sz - 1) / 8 + 1; i++) {
+			netdev_dbg(adapter->netdev, "%016lx\n",
+				   ((unsigned long *)(login_rsp))[i]);
+		}
+
+		/* Sanity checks */
+		if (login->num_txcomp_subcrqs != login_rsp->num_txsubm_subcrqs ||
+		    (be32_to_cpu(login->num_rxcomp_subcrqs) *
+		    adapter->req_rx_add_queues !=
+		    be32_to_cpu(login_rsp->num_rxadd_subcrqs))) {
+			netdev_warn(netdev, "Inconsistent login and login rsp\n");
+		} else if (be32_to_cpu(login->login_rsp_len) < rsp_len ||
+			 rsp_len <= be32_to_cpu(login_rsp->off_txsubm_subcrqs) ||
+			 rsp_len <= be32_to_cpu(login_rsp->off_rxadd_subcrqs) ||
+			 rsp_len <= be32_to_cpu(login_rsp->off_rxadd_buff_size) ||
+			 rsp_len <= be32_to_cpu(login_rsp->off_supp_tx_desc)) {
+			/* This can happen if 2 login requests sent, the LOGIN_RSP crq
+			 * could have been for the older login request. So we are
+			 * parsing the newer response buffer which may be incomplete
+			 */
+			netdev_warn(netdev, "FATAL: Login rsp offsets/lengths invalid\n");
+		} else {
+			/* login response is valid */
+			break;
+		}
+
+		/* If this is the last login request then there is an issue */
+		if (list_is_first(entry, &adapter->login_list)) {
+			dev_err(dev, "FATAL: Inconsistent login and login rsp\n");
+			release_all_login_attempts(adapter);
+			ibmvnic_reset(adapter, VNIC_RESET_FATAL);
+			return -EIO;
+		}
+	}
+
 	netdev->mtu = adapter->req_mtu - ETH_HLEN;
-
-	netdev_dbg(adapter->netdev, "Login Response Buffer:\n");
-	for (i = 0; i < (login_attempt->login_rsp_buf_sz - 1) / 8 + 1; i++) {
-		netdev_dbg(adapter->netdev, "%016lx\n",
-			   ((unsigned long *)(login_rsp))[i]);
-	}
-
-	/* Sanity checks */
-	if (login->num_txcomp_subcrqs != login_rsp->num_txsubm_subcrqs ||
-	    (be32_to_cpu(login->num_rxcomp_subcrqs) *
-	     adapter->req_rx_add_queues !=
-	     be32_to_cpu(login_rsp->num_rxadd_subcrqs))) {
-		dev_err(dev, "FATAL: Inconsistent login and login rsp\n");
-		ibmvnic_reset(adapter, VNIC_RESET_FATAL);
-		return -EIO;
-	}
-
-	if (be32_to_cpu(login->login_rsp_len) < rsp_len ||
-	    rsp_len <= be32_to_cpu(login_rsp->off_txsubm_subcrqs) ||
-	    rsp_len <= be32_to_cpu(login_rsp->off_rxadd_subcrqs) ||
-	    rsp_len <= be32_to_cpu(login_rsp->off_rxadd_buff_size) ||
-	    rsp_len <= be32_to_cpu(login_rsp->off_supp_tx_desc)) {
-		/* This can happen if 2 login requests sent, the LOGIN_RSP crq
-		 *  could have been for the older login request. So we are
-		 *  parsing the newer response buffer which may be incomplete
-		 */
-		dev_err(dev, "FATAL: Login rsp offsets/lengths invalid\n");
-		ibmvnic_reset(adapter, VNIC_RESET_FATAL);
-		return -EIO;
-	}
 
 	size_array = (u64 *)((u8 *)(login_rsp) +
 		be32_to_cpu(login_rsp->off_rxadd_buff_size));
@@ -5506,7 +5534,7 @@ static int handle_login_rsp(union ibmvnic_crq *login_rsp_crq,
 
 	adapter->num_active_tx_scrqs = num_tx_pools;
 	adapter->num_active_rx_scrqs = num_rx_pools;
-	release_one_login_attempt(adapter);
+	release_one_login_attempt(login_attempt, adapter);
 	complete(&adapter->init_done);
 
 	return 0;
@@ -5823,7 +5851,7 @@ static void ibmvnic_handle_crq(union ibmvnic_crq *crq,
 			/* Discard any stale login responses from prev reset.
 			 * CHECK: should we clear even on INIT_COMPLETE?
 			 */
-			adapter->login_pending = false;
+			release_all_login_attempts(adapter);
 
 			if (adapter->state == VNIC_DOWN)
 				rc = ibmvnic_reset(adapter, VNIC_RESET_PASSIVE_INIT);
@@ -6290,7 +6318,6 @@ static int ibmvnic_probe(struct vio_dev *dev, const struct vio_device_id *id)
 	dev_set_drvdata(&dev->dev, netdev);
 	adapter->vdev = dev;
 	adapter->netdev = netdev;
-	adapter->login_pending = false;
 	memset(&adapter->map_ids, 0, sizeof(adapter->map_ids));
 	/* map_ids start at 1, so ensure map_id 0 is always "in-use" */
 	bitmap_set(adapter->map_ids, 0, 1);
@@ -6306,6 +6333,7 @@ static int ibmvnic_probe(struct vio_dev *dev, const struct vio_device_id *id)
 	INIT_DELAYED_WORK(&adapter->ibmvnic_delayed_reset,
 			  __ibmvnic_delayed_reset);
 	INIT_LIST_HEAD(&adapter->rwi_list);
+	INIT_LIST_HEAD(&adapter->login_list);
 	spin_lock_init(&adapter->rwi_lock);
 	spin_lock_init(&adapter->state_lock);
 	mutex_init(&adapter->fw_lock);
