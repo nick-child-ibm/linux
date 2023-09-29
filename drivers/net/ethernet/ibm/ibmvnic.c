@@ -2675,9 +2675,10 @@ static int do_reset(struct ibmvnic_adapter *adapter,
 		   adapter_state_to_string(reset_state));
 
 	adapter->reset_reason = rwi->reset_reason;
-	/* requestor of VNIC_RESET_CHANGE_PARAM already has the rtnl lock */
-	if (!(adapter->reset_reason == VNIC_RESET_CHANGE_PARAM))
-		rtnl_lock();
+	/* only VNIC_RESET_CHANGE_PARAM grabs rtnl lock beforehand so we are
+	 * safe because CHANGE_PARAM uses do_hard_reset()
+	 */
+	rtnl_lock();
 
 	/* Now that we have the rtnl lock, clear any pending failover.
 	 * This will ensure ibmvnic_open() has either completed or will
@@ -2706,53 +2707,40 @@ static int do_reset(struct ibmvnic_adapter *adapter,
 	if (reset_state == VNIC_OPEN &&
 	    adapter->reset_reason != VNIC_RESET_MOBILITY &&
 	    adapter->reset_reason != VNIC_RESET_FAILOVER) {
-		if (adapter->reset_reason == VNIC_RESET_CHANGE_PARAM) {
-			rc = __ibmvnic_close(netdev);
-			if (rc)
-				goto out;
-		} else {
-			adapter->state = VNIC_CLOSING;
+		adapter->state = VNIC_CLOSING;
+		/* Release the RTNL lock before link state change and
+		 * re-acquire after the link state change to allow
+		 * linkwatch_event to grab the RTNL lock and run during
+		 * a reset.
+		 */
+		rtnl_unlock();
+		rc = set_link_state(adapter, IBMVNIC_LOGICAL_LNK_DN);
+		rtnl_lock();
+		if (rc)
+			goto out;
 
-			/* Release the RTNL lock before link state change and
-			 * re-acquire after the link state change to allow
-			 * linkwatch_event to grab the RTNL lock and run during
-			 * a reset.
+		if (adapter->state == VNIC_OPEN) {
+			/* When we dropped rtnl, ibmvnic_open() got
+			 * it and noticed that we are resetting and
+			 * set the adapter state to OPEN. Update our
+			 * new "target" state, and resume the reset
+			 * from VNIC_CLOSING state.
 			 */
-			rtnl_unlock();
-			rc = set_link_state(adapter, IBMVNIC_LOGICAL_LNK_DN);
-			rtnl_lock();
-			if (rc)
-				goto out;
-
-			if (adapter->state == VNIC_OPEN) {
-				/* When we dropped rtnl, ibmvnic_open() got
-				 * it and noticed that we are resetting and
-				 * set the adapter state to OPEN. Update our
-				 * new "target" state, and resume the reset
-				 * from VNIC_CLOSING state.
-				 */
-				netdev_dbg(netdev,
-					   "Open changed state from %s, updating.\n",
-					   adapter_state_to_string(reset_state));
-				reset_state = VNIC_OPEN;
-				adapter->state = VNIC_CLOSING;
-			}
-
-			if (adapter->state != VNIC_CLOSING) {
-				/* If someone else changed the adapter state
-				 * when we dropped the rtnl, fail the reset
-				 */
-				rc = -EAGAIN;
-				goto out;
-			}
-			adapter->state = VNIC_CLOSED;
+			netdev_dbg(netdev,
+				   "Open changed state from %s, updating.\n",
+				   adapter_state_to_string(reset_state));
+			reset_state = VNIC_OPEN;
+			adapter->state = VNIC_CLOSING;
 		}
-	}
 
-	if (adapter->reset_reason == VNIC_RESET_CHANGE_PARAM) {
-		release_resources(adapter);
-		release_sub_crqs(adapter, 1);
-		release_crq_queue(adapter);
+		if (adapter->state != VNIC_CLOSING) {
+			/* If someone else changed the adapter state
+			 * when we dropped the rtnl, fail the reset
+			 */
+			rc = -EAGAIN;
+			goto out;
+		}
+		adapter->state = VNIC_CLOSED;
 	}
 
 	if (adapter->reset_reason != VNIC_RESET_NON_FATAL) {
@@ -2763,9 +2751,7 @@ static int do_reset(struct ibmvnic_adapter *adapter,
 
 		reinit_init_done(adapter);
 
-		if (adapter->reset_reason == VNIC_RESET_CHANGE_PARAM) {
-			rc = init_crq_queue(adapter);
-		} else if (adapter->reset_reason == VNIC_RESET_MOBILITY) {
+		if (adapter->reset_reason == VNIC_RESET_MOBILITY) {
 			rc = ibmvnic_reenable_crq_queue(adapter);
 			release_sub_crqs(adapter, 1);
 		} else {
@@ -2801,11 +2787,7 @@ static int do_reset(struct ibmvnic_adapter *adapter,
 		if (rc)
 			goto out;
 
-		if (adapter->reset_reason == VNIC_RESET_CHANGE_PARAM) {
-			rc = init_resources(adapter);
-			if (rc)
-				goto out;
-		} else if (adapter->req_rx_queues != old_num_rx_queues ||
+		if (adapter->req_rx_queues != old_num_rx_queues ||
 		    adapter->req_tx_queues != old_num_tx_queues ||
 		    adapter->req_rx_add_entries_per_subcrq !=
 		    old_num_rx_slots ||
@@ -2866,9 +2848,7 @@ out:
 	/* restore the adapter state if reset failed */
 	if (rc)
 		adapter->state = reset_state;
-	/* requestor of VNIC_RESET_CHANGE_PARAM should still hold the rtnl lock */
-	if (!(adapter->reset_reason == VNIC_RESET_CHANGE_PARAM))
-		rtnl_unlock();
+	rtnl_unlock();
 
 	netdev_dbg(adapter->netdev, "[S:%s FOP:%d] Reset done, rc %d\n",
 		   adapter_state_to_string(adapter->state),
@@ -3186,6 +3166,11 @@ static void __ibmvnic_reset(struct work_struct *work)
 				set_current_state(TASK_UNINTERRUPTIBLE);
 				schedule_timeout(60 * HZ);
 			}
+		} else if (rwi->reset_reason == VNIC_RESET_CHANGE_PARAM) {
+			ASSERT_RTNL();
+			if (reset_state == VNIC_OPEN)
+				__ibmvnic_close();
+			rc = do_hard_reset(adapter, rwi, reset_state);
 		} else {
 			rc = do_reset(adapter, rwi, reset_state);
 		}
