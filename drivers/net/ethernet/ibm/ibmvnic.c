@@ -2719,24 +2719,14 @@ static int do_reset(struct ibmvnic_adapter *adapter,
 		if (rc)
 			goto out;
 
-		if (adapter->state == VNIC_OPEN) {
-			/* When we dropped rtnl, ibmvnic_open() got
-			 * it and noticed that we are resetting and
-			 * set the adapter state to OPEN. Update our
-			 * new "target" state, and resume the reset
-			 * from VNIC_CLOSING state.
-			 */
-			netdev_dbg(netdev,
-				   "Open changed state from %s, updating.\n",
-				   adapter_state_to_string(reset_state));
-			reset_state = VNIC_OPEN;
-			adapter->state = VNIC_CLOSING;
-		}
-
 		if (adapter->state != VNIC_CLOSING) {
-			/* If someone else changed the adapter state
-			 * when we dropped the rtnl, fail the reset
+			/* When we dropped rtnl, something else could
+			 * have grabbed it (like open(), close() or remove())
+			 * in that case just return early failure to avoid
+			 * parallel operations
 			 */
+			netdev_err(netdev, "During reset, state change from %s to %s\n",
+				   VNIC_CLOSING, adapter_state_to_string(adapter->state));
 			rc = -EAGAIN;
 			goto out;
 		}
