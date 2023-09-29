@@ -2733,85 +2733,103 @@ static int do_reset(struct ibmvnic_adapter *adapter,
 		adapter->state = VNIC_CLOSED;
 	}
 
-	if (adapter->reset_reason != VNIC_RESET_NON_FATAL) {
-		/* remove the closed state so when we call open it appears
-		 * we are coming from the probed state.
-		 */
-		adapter->state = VNIC_PROBED;
+	/* NON_FATAL resets are quick so we can be done right here */
+	if (adapter->reset_reason == VNIC_RESET_NON_FATAL) {
+		adapter->state = VNIC_CLOSED;
+		rc = 0;
+		if (reset_state == VNIC_CLOSED)
+			goto out;
 
-		reinit_init_done(adapter);
-
-		if (adapter->reset_reason == VNIC_RESET_MOBILITY) {
-			rc = ibmvnic_reenable_crq_queue(adapter);
-			release_sub_crqs(adapter, 1);
-		} else {
-			rc = ibmvnic_reset_crq(adapter);
-			if (rc == H_CLOSED || rc == H_SUCCESS) {
-				rc = vio_enable_interrupts(adapter->vdev);
-				if (rc)
-					netdev_err(adapter->netdev,
-						   "Reset failed to enable interrupts. rc=%d\n",
-						   rc);
-			}
-		}
-
+		rc = __ibmvnic_open(netdev);
 		if (rc) {
-			netdev_err(adapter->netdev,
-				   "Reset couldn't initialize crq. rc=%d\n", rc);
+			rc = IBMVNIC_OPEN_FAILED;
 			goto out;
 		}
 
-		rc = ibmvnic_reset_init(adapter, true);
-		if (rc)
-			goto out;
+		/* refresh device's multicast list */
+		ibmvnic_set_multi(netdev);
 
-		/* If the adapter was in PROBE or DOWN state prior to the reset,
-		 * exit here.
-		 */
-		if (reset_state == VNIC_PROBED || reset_state == VNIC_DOWN) {
-			rc = 0;
-			goto out;
-		}
-
-		rc = ibmvnic_login(netdev);
-		if (rc)
-			goto out;
-
-		if (adapter->req_rx_queues != old_num_rx_queues ||
-		    adapter->req_tx_queues != old_num_tx_queues ||
-		    adapter->req_rx_add_entries_per_subcrq !=
-		    old_num_rx_slots ||
-		    adapter->req_tx_entries_per_subcrq !=
-		    old_num_tx_slots ||
-		    !adapter->rx_pool ||
-		    !adapter->tso_pool ||
-		    !adapter->tx_pool) {
-			release_napi(adapter);
-			release_vpd_data(adapter);
-
-			rc = init_resources(adapter);
-			if (rc)
-				goto out;
-
-		} else {
-			rc = init_tx_pools(netdev);
-			if (rc) {
-				netdev_dbg(netdev,
-					   "init tx pools failed (%d)\n",
-					   rc);
-				goto out;
-			}
-
-			rc = init_rx_pools(netdev);
-			if (rc) {
-				netdev_dbg(netdev,
-					   "init rx pools failed (%d)\n",
-					   rc);
-				goto out;
-			}
-		}
-		ibmvnic_disable_irqs(adapter);
+		goto out;
 	}
+
+	/* remove the closed state so when we call open it appears
+	 * we are coming from the probed state.
+	 */
+	adapter->state = VNIC_PROBED;
+
+	reinit_init_done(adapter);
+
+	if (adapter->reset_reason == VNIC_RESET_MOBILITY) {
+		rc = ibmvnic_reenable_crq_queue(adapter);
+		release_sub_crqs(adapter, 1);
+	} else {
+		rc = ibmvnic_reset_crq(adapter);
+		if (rc == H_CLOSED || rc == H_SUCCESS) {
+			rc = vio_enable_interrupts(adapter->vdev);
+			if (rc)
+				netdev_err(adapter->netdev,
+					   "Reset failed to enable interrupts. rc=%d\n",
+					   rc);
+		}
+	}
+
+	if (rc) {
+		netdev_err(adapter->netdev,
+			   "Reset couldn't initialize crq. rc=%d\n", rc);
+		goto out;
+	}
+
+	rc = ibmvnic_reset_init(adapter, true);
+	if (rc)
+		goto out;
+
+	/* If the adapter was in PROBE or DOWN state prior to the reset,
+	 * exit here.
+	 */
+	if (reset_state == VNIC_PROBED || reset_state == VNIC_DOWN) {
+		rc = 0;
+		goto out;
+	}
+
+	rc = ibmvnic_login(netdev);
+	if (rc)
+		goto out;
+
+	if (adapter->req_rx_queues != old_num_rx_queues ||
+	    adapter->req_tx_queues != old_num_tx_queues ||
+	    adapter->req_rx_add_entries_per_subcrq !=
+	    old_num_rx_slots ||
+	    adapter->req_tx_entries_per_subcrq !=
+	    old_num_tx_slots ||
+	    !adapter->rx_pool ||
+	    !adapter->tso_pool ||
+	    !adapter->tx_pool) {
+		release_napi(adapter);
+		release_vpd_data(adapter);
+
+		rc = init_resources(adapter);
+		if (rc)
+			goto out;
+
+	} else {
+		rc = init_tx_pools(netdev);
+		if (rc) {
+			netdev_dbg(netdev,
+				   "init tx pools failed (%d)\n",
+				   rc);
+			goto out;
+		}
+
+		rc = init_rx_pools(netdev);
+		if (rc) {
+			netdev_dbg(netdev,
+				   "init rx pools failed (%d)\n",
+				   rc);
+			goto out;
+		}
+	}
+	ibmvnic_disable_irqs(adapter);
+
 	adapter->state = VNIC_CLOSED;
 
 	if (reset_state == VNIC_CLOSED) {
