@@ -809,7 +809,6 @@ static void replenish_rx_pool(struct ibmvnic_adapter *adapter,
 		/* Copy the skb to the long term mapped DMA buffer */
 		map_rxpool_buf_to_ltb(pool, bufidx, &ltb, &offset);
 		dst = ltb->buff + offset;
-		memset(dst, 0, pool->buff_size);
 		dma_addr = ltb->addr + offset;
 
 		/* add the skb to an rx_buff in the pool */
@@ -821,7 +820,6 @@ static void replenish_rx_pool(struct ibmvnic_adapter *adapter,
 
 		/* queue the rx_buff for the next send_subcrq_indirect */
 		sub_crq = &ind_bufp->indir_arr[ind_bufp->index++];
-		memset(sub_crq, 0, sizeof(*sub_crq));
 		sub_crq->rx_add.first = IBMVNIC_CRQ_CMD;
 		sub_crq->rx_add.correlator =
 		    cpu_to_be64((u64)&pool->rx_buff[bufidx]);
@@ -2458,7 +2456,6 @@ static netdev_tx_t ibmvnic_xmit(struct sk_buff *skb, struct net_device *netdev)
 	map_txpool_buf_to_ltb(tx_pool, bufidx, &ltb, &offset);
 
 	dst = ltb->buff + offset;
-	memset(dst, 0, tx_pool->buf_size);
 	data_dma_addr = ltb->addr + offset;
 
 	if (skb_shinfo(skb)->nr_frags) {
@@ -2488,7 +2485,6 @@ static netdev_tx_t ibmvnic_xmit(struct sk_buff *skb, struct net_device *netdev)
 	tx_buff->index = bufidx;
 	tx_buff->pool_index = queue_num;
 
-	memset(&tx_crq, 0, sizeof(tx_crq));
 	tx_crq.v1.first = IBMVNIC_CRQ_CMD;
 	tx_crq.v1.type = IBMVNIC_TX_DESC;
 	tx_crq.v1.n_crq_elem = 1;
