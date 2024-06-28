@@ -118,7 +118,8 @@ struct ibmveth_buff_pool {
     u32 consumer_index;
     u32 producer_index;
     u16 *free_map;
-    dma_addr_t *dma_addr;
+    unsigned char *ltb;
+    dma_addr_t ltb_dma;
     struct sk_buff **skbuff;
     int active;
     struct kobject kobj;
