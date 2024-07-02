@@ -109,6 +109,11 @@ static int pool_active[] = { 1, 1, 0, 0, 1};
 
 #define IBM_VETH_INVALID_MAP ((u16)0xffff)
 
+struct ibmveth_pool_entry {
+	dma_addr_t dma_addr;
+	struct sk_buff *skbuff;
+};
+
 struct ibmveth_buff_pool {
     u32 size;
     u32 index;
@@ -118,11 +123,10 @@ struct ibmveth_buff_pool {
     u32 consumer_index;
     u32 producer_index;
     u16 *free_map;
-    dma_addr_t *dma_addr;
-    struct sk_buff **skbuff;
+    struct ibmveth_pool_entry *entries;
     int active;
     struct kobject kobj;
-};
+} ____cacheline_aligned;
 
 struct ibmveth_rx_q {
     u64        index;

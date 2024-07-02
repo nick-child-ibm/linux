@@ -170,19 +170,8 @@ static int ibmveth_alloc_buffer_pool(struct ibmveth_buff_pool *pool)
 	if (!pool->free_map)
 		return -1;
 
-	pool->dma_addr = kcalloc(pool->size, sizeof(dma_addr_t), GFP_KERNEL);
-	if (!pool->dma_addr) {
-		kfree(pool->free_map);
-		pool->free_map = NULL;
-		return -1;
-	}
-
-	pool->skbuff = kcalloc(pool->size, sizeof(void *), GFP_KERNEL);
-
-	if (!pool->skbuff) {
-		kfree(pool->dma_addr);
-		pool->dma_addr = NULL;
-
+	pool->entries = kcalloc(pool->size, sizeof(*pool->entries), GFP_KERNEL);
+	if (!pool->entries) {
 		kfree(pool->free_map);
 		pool->free_map = NULL;
 		return -1;
@@ -242,7 +231,7 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 		index = pool->free_map[free_index];
 
 		BUG_ON(index == IBM_VETH_INVALID_MAP);
-		BUG_ON(pool->skbuff[index] != NULL);
+		BUG_ON(pool->entries[index].skbuff != NULL);
 
 		dma_addr = dma_map_single(&adapter->vdev->dev, skb->data,
 				pool->buff_size, DMA_FROM_DEVICE);
@@ -251,8 +240,8 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 			goto failure;
 
 		pool->free_map[free_index] = IBM_VETH_INVALID_MAP;
-		pool->dma_addr[index] = dma_addr;
-		pool->skbuff[index] = skb;
+		pool->entries[index].dma_addr = dma_addr;
+		pool->entries[index].skbuff = skb;
 
 		correlator = ((u64)pool->index << 32) | index;
 		*(u64 *)skb->data = correlator;
@@ -283,14 +272,14 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 
 failure:
 	pool->free_map[free_index] = index;
-	pool->skbuff[index] = NULL;
+	pool->entries[index].skbuff = NULL;
 	if (pool->consumer_index == 0)
 		pool->consumer_index = pool->size - 1;
 	else
 		pool->consumer_index--;
 	if (!dma_mapping_error(&adapter->vdev->dev, dma_addr))
 		dma_unmap_single(&adapter->vdev->dev,
-		                 pool->dma_addr[index], pool->buff_size,
+		                 pool->entries[index].dma_addr, pool->buff_size,
 		                 DMA_FROM_DEVICE);
 	dev_kfree_skb_any(skb);
 	adapter->replenish_add_buff_failure++;
@@ -338,28 +327,20 @@ static void ibmveth_free_buffer_pool(struct ibmveth_adapter *adapter,
 	kfree(pool->free_map);
 	pool->free_map = NULL;
 
-	if (pool->skbuff && pool->dma_addr) {
+	if (pool->entries) {
 		for (i = 0; i < pool->size; ++i) {
-			struct sk_buff *skb = pool->skbuff[i];
+			struct sk_buff *skb = pool->entries[i].skbuff;
 			if (skb) {
 				dma_unmap_single(&adapter->vdev->dev,
-						 pool->dma_addr[i],
+						 pool->entries[i].dma_addr,
 						 pool->buff_size,
 						 DMA_FROM_DEVICE);
 				dev_kfree_skb_any(skb);
-				pool->skbuff[i] = NULL;
+				pool->entries[i].skbuff = NULL;
 			}
 		}
-	}
-
-	if (pool->dma_addr) {
-		kfree(pool->dma_addr);
-		pool->dma_addr = NULL;
-	}
-
-	if (pool->skbuff) {
-		kfree(pool->skbuff);
-		pool->skbuff = NULL;
+		kfree(pool->entries);
+		pool->entries = NULL;
 	}
 }
 
@@ -375,14 +356,14 @@ static void ibmveth_remove_buffer_from_pool(struct ibmveth_adapter *adapter,
 	BUG_ON(pool >= IBMVETH_NUM_BUFF_POOLS);
 	BUG_ON(index >= adapter->rx_buff_pool[pool].size);
 
-	skb = adapter->rx_buff_pool[pool].skbuff[index];
+	skb = adapter->rx_buff_pool[pool].entries[index].skbuff;
 
 	BUG_ON(skb == NULL);
 
-	adapter->rx_buff_pool[pool].skbuff[index] = NULL;
+	adapter->rx_buff_pool[pool].entries[index].skbuff = NULL;
 
 	dma_unmap_single(&adapter->vdev->dev,
-			 adapter->rx_buff_pool[pool].dma_addr[index],
+			 adapter->rx_buff_pool[pool].entries[index].dma_addr,
 			 adapter->rx_buff_pool[pool].buff_size,
 			 DMA_FROM_DEVICE);
 
@@ -408,7 +389,7 @@ static inline struct sk_buff *ibmveth_rxq_get_buffer(struct ibmveth_adapter *ada
 	BUG_ON(pool >= IBMVETH_NUM_BUFF_POOLS);
 	BUG_ON(index >= adapter->rx_buff_pool[pool].size);
 
-	return adapter->rx_buff_pool[pool].skbuff[index];
+	return adapter->rx_buff_pool[pool].entries[index].skbuff;
 }
 
 /* recycle the current buffer on the rx queue */
@@ -433,7 +414,7 @@ static int ibmveth_rxq_recycle_buffer(struct ibmveth_adapter *adapter)
 
 	desc.fields.flags_len = IBMVETH_BUF_VALID |
 		adapter->rx_buff_pool[pool].buff_size;
-	desc.fields.address = adapter->rx_buff_pool[pool].dma_addr[index];
+	desc.fields.address = adapter->rx_buff_pool[pool].entries[index].dma_addr;
 
 	lpar_rc = h_add_logical_lan_buffer(adapter->vdev->unit_address, desc.desc);
 
