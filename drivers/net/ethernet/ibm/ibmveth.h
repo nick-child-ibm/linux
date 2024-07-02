@@ -101,13 +101,20 @@ static inline long h_illan_attributes(unsigned long unit_address,
 #define IBMVETH_MAX_TX_BUF_SIZE (1024 * 64)
 #define IBMVETH_MAX_QUEUES 16U
 #define IBMVETH_DEFAULT_QUEUES 8U
-
+#define IBMVETH_ASYNC_RX_LENGTH 128
+#define IBMVETH_ASYNC_DONE_COOKIE 0
 static int pool_size[] = { 512, 1024 * 2, 1024 * 16, 1024 * 32, 1024 * 64 };
 static int pool_count[] = { 256, 512, 256, 256, 256 };
 static int pool_count_cmo[] = { 256, 512, 256, 256, 64 };
 static int pool_active[] = { 1, 1, 0, 0, 1};
 
 #define IBM_VETH_INVALID_MAP ((u16)0xffff)
+
+struct ibmveth_async_data {
+	struct ibmveth_adapter *adapter;
+	u64 correlator;
+	bool done;
+};
 
 struct ibmveth_buff_pool {
     u32 size;
@@ -145,6 +152,8 @@ struct ibmveth_adapter {
     dma_addr_t tx_ltb_dma[IBMVETH_MAX_QUEUES];
     dma_addr_t buffer_list_dma;
     dma_addr_t filter_list_dma;
+    struct ibmveth_async_data async_rx_data[IBMVETH_ASYNC_RX_LENGTH];
+    u32 async_rx_ptr_idx;
     struct ibmveth_buff_pool rx_buff_pool[IBMVETH_NUM_BUFF_POOLS];
     struct ibmveth_rx_q rx_queue;
     int rx_csum;

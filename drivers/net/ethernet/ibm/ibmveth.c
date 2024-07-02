@@ -21,6 +21,7 @@
 #include <linux/skbuff.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
+#include <linux/async.h>
 #include <linux/mm.h>
 #include <linux/pm.h>
 #include <linux/ethtool.h>
@@ -41,6 +42,10 @@
 static irqreturn_t ibmveth_interrupt(int irq, void *dev_instance);
 static void ibmveth_rxq_harvest_buffer(struct ibmveth_adapter *adapter);
 static unsigned long ibmveth_get_desired_dma(struct vio_dev *vdev);
+
+static void ibmveth_send_logical_lan(void *data, async_cookie_t cookie);
+static int ibmveth_async_rx_add(struct ibmveth_adapter *adapter,
+				 u64 correlator);
 
 static struct kobj_type ktype_veth_pool;
 
@@ -80,6 +85,8 @@ struct ibmveth_stat {
 
 #define IBMVETH_STAT_OFF(stat) offsetof(struct ibmveth_adapter, stat)
 #define IBMVETH_GET_STAT(a, off) *((u64 *)(((unsigned long)(a)) + off))
+
+static ASYNC_DOMAIN_EXCLUSIVE(ibmveth_domain);
 
 static struct ibmveth_stat ibmveth_stats[] = {
 	{ "replenish_task_cycles", IBMVETH_STAT_OFF(replenish_task_cycles) },
@@ -218,14 +225,11 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 	struct sk_buff *skb;
 	unsigned int free_index, index;
 	u64 correlator;
-	unsigned long lpar_rc;
 	dma_addr_t dma_addr;
 
 	mb();
 
 	for (i = 0; i < count; ++i) {
-		union ibmveth_buf_desc desc;
-
 		skb = netdev_alloc_skb(adapter->netdev, pool->buff_size);
 
 		if (!skb) {
@@ -257,24 +261,17 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 		correlator = ((u64)pool->index << 32) | index;
 		*(u64 *)skb->data = correlator;
 
-		desc.fields.flags_len = IBMVETH_BUF_VALID | pool->buff_size;
-		desc.fields.address = dma_addr;
-
 		if (rx_flush) {
 			unsigned int len = min(pool->buff_size,
 						adapter->netdev->mtu +
 						IBMVETH_BUFF_OH);
 			ibmveth_flush_buffer(skb->data, len);
 		}
-		lpar_rc = h_add_logical_lan_buffer(adapter->vdev->unit_address,
-						   desc.desc);
 
-		if (lpar_rc != H_SUCCESS) {
+		if (ibmveth_async_rx_add(adapter, correlator))
 			goto failure;
-		} else {
-			buffers_added++;
-			adapter->replenish_add_buff_success++;
-		}
+
+		buffers_added++;
 	}
 
 	mb();
@@ -411,16 +408,74 @@ static inline struct sk_buff *ibmveth_rxq_get_buffer(struct ibmveth_adapter *ada
 	return adapter->rx_buff_pool[pool].skbuff[index];
 }
 
-/* recycle the current buffer on the rx queue */
+static void ibmveth_send_logical_lan(void *data, async_cookie_t cookie) {
+	struct ibmveth_async_data *veth_data = data;
+	struct ibmveth_adapter *adapter = veth_data->adapter;
+	u64 correlator = veth_data->correlator;
+	union ibmveth_buf_desc desc;
+	unsigned int pool, index;
+	long rc;
+
+	pool = correlator >> 32;
+	index = correlator & 0xffffffffUL;
+
+	desc.fields.flags_len = IBMVETH_BUF_VALID |
+		adapter->rx_buff_pool[pool].buff_size;
+	desc.fields.address = adapter->rx_buff_pool[pool].dma_addr[index];
+
+	rc = h_add_logical_lan_buffer(adapter->vdev->unit_address, desc.desc);
+	
+	veth_data->done = true;
+	if (likely(rc == H_SUCCESS)){
+		adapter->replenish_add_buff_success++;
+		return;
+	}
+
+	/* error recovery */
+	netdev_dbg(adapter->netdev, "h_add_logical_lan_buffer failed rc=%ld\n",
+		   rc);
+	kfree(adapter->rx_buff_pool[pool].skbuff[index]);
+	ibmveth_remove_buffer_from_pool(adapter, correlator);
+	adapter->replenish_add_buff_failure++;
+}
+
+/* return nonzero if couldn't schedule due to full work queue */
+static int ibmveth_async_rx_add(struct ibmveth_adapter *adapter, u64 correlator)
+{
+	u32 next_idx = (adapter->async_rx_ptr_idx + 1) % IBMVETH_ASYNC_RX_LENGTH;
+	bool oldest_done = adapter->async_rx_data[next_idx].done;
+	
+	/* make sure we are not overwriting unprocessed data
+	 * we can't use async_synchronize functions because we can't sleep here
+	 */
+	if (!oldest_done)
+		return 1;
+
+	adapter->async_rx_data[next_idx].correlator = correlator;
+	/* async_schedule_domain can call ibmveth_send_logical_lan
+	 * syncronously so we need to mark NOT done before calling.
+	 * yes this does mean that our async_rx_data may not be FIFO
+	 */
+	adapter->async_rx_data[next_idx].done = false;
+	async_schedule_domain(ibmveth_send_logical_lan,
+			      &adapter->async_rx_data[next_idx],
+			      &ibmveth_domain);
+
+	adapter->async_rx_ptr_idx = next_idx;
+	return 0;
+}
+
+/* recycle the current buffer on the rx queue
+ * returns 0 on recycle successfully queued
+ * return nonzero if queueing failed, caller must free skb
+ */
 static int ibmveth_rxq_recycle_buffer(struct ibmveth_adapter *adapter)
 {
 	u32 q_index = adapter->rx_queue.index;
 	u64 correlator = adapter->rx_queue.queue_addr[q_index].correlator;
 	unsigned int pool = correlator >> 32;
 	unsigned int index = correlator & 0xffffffffUL;
-	union ibmveth_buf_desc desc;
-	unsigned long lpar_rc;
-	int ret = 1;
+	int rc = 1;
 
 	BUG_ON(pool >= IBMVETH_NUM_BUFF_POOLS);
 	BUG_ON(index >= adapter->rx_buff_pool[pool].size);
@@ -428,29 +483,20 @@ static int ibmveth_rxq_recycle_buffer(struct ibmveth_adapter *adapter)
 	if (!adapter->rx_buff_pool[pool].active) {
 		ibmveth_rxq_harvest_buffer(adapter);
 		ibmveth_free_buffer_pool(adapter, &adapter->rx_buff_pool[pool]);
-		goto out;
+		return 1;
 	}
 
-	desc.fields.flags_len = IBMVETH_BUF_VALID |
-		adapter->rx_buff_pool[pool].buff_size;
-	desc.fields.address = adapter->rx_buff_pool[pool].dma_addr[index];
-
-	lpar_rc = h_add_logical_lan_buffer(adapter->vdev->unit_address, desc.desc);
-
-	if (lpar_rc != H_SUCCESS) {
-		netdev_dbg(adapter->netdev, "h_add_logical_lan_buffer failed "
-			   "during recycle rc=%ld", lpar_rc);
-		ibmveth_remove_buffer_from_pool(adapter, adapter->rx_queue.queue_addr[adapter->rx_queue.index].correlator);
-		ret = 0;
-	}
+	if (!ibmveth_async_rx_add(adapter, correlator))
+		rc = 0;
+	else
+		ibmveth_remove_buffer_from_pool(adapter,correlator);
 
 	if (++adapter->rx_queue.index == adapter->rx_queue.num_slots) {
 		adapter->rx_queue.index = 0;
 		adapter->rx_queue.toggle = !adapter->rx_queue.toggle;
 	}
 
-out:
-	return ret;
+	return rc;
 }
 
 static void ibmveth_rxq_harvest_buffer(struct ibmveth_adapter *adapter)
@@ -554,6 +600,11 @@ static int ibmveth_open(struct net_device *netdev)
 	}
 
 	dev = &adapter->vdev->dev;
+	adapter->async_rx_ptr_idx = 0;
+	for (i = 0; i < IBMVETH_ASYNC_RX_LENGTH; i++) {
+		adapter->async_rx_data[i].done = true;
+		adapter->async_rx_data[i].adapter = adapter;
+	}
 
 	adapter->rx_queue.queue_len = sizeof(struct ibmveth_rx_q_entry) *
 						rxq_entries;
@@ -693,6 +744,8 @@ static int ibmveth_close(struct net_device *netdev)
 	netif_tx_stop_all_queues(netdev);
 
 	h_vio_signal(adapter->vdev->unit_address, VIO_IRQ_DISABLE);
+
+	async_synchronize_full_domain(&ibmveth_domain);
 
 	do {
 		lpar_rc = h_free_logical_lan(adapter->vdev->unit_address);
@@ -1342,20 +1395,22 @@ static int ibmveth_poll(struct napi_struct *napi, int budget)
 			break;
 
 		smp_rmb();
+
+		struct sk_buff *skb, *new_skb;
+		skb = ibmveth_rxq_get_buffer(adapter);
+
 		if (!ibmveth_rxq_buffer_valid(adapter)) {
 			wmb(); /* suggested by larson1 */
 			adapter->rx_invalid_buffer++;
 			netdev_dbg(netdev, "recycling invalid buffer\n");
-			ibmveth_rxq_recycle_buffer(adapter);
+			if (ibmveth_rxq_recycle_buffer(adapter))
+				kfree_skb(skb);
 		} else {
-			struct sk_buff *skb, *new_skb;
 			int length = ibmveth_rxq_frame_length(adapter);
 			int offset = ibmveth_rxq_frame_offset(adapter);
 			int csum_good = ibmveth_rxq_csum_good(adapter);
 			int lrg_pkt = ibmveth_rxq_large_packet(adapter);
 			__sum16 iph_check = 0;
-
-			skb = ibmveth_rxq_get_buffer(adapter);
 
 			/* if the large packet bit is set in the rx queue
 			 * descriptor, the mss will be written by PHYP eight
@@ -1379,7 +1434,7 @@ static int ibmveth_poll(struct napi_struct *napi, int budget)
 				if (rx_flush)
 					ibmveth_flush_buffer(skb->data,
 						length + offset);
-				if (!ibmveth_rxq_recycle_buffer(adapter))
+				if (ibmveth_rxq_recycle_buffer(adapter))
 					kfree_skb(skb);
 				skb = new_skb;
 			} else {
@@ -1414,8 +1469,8 @@ static int ibmveth_poll(struct napi_struct *napi, int budget)
 
 			netdev->stats.rx_packets++;
 			netdev->stats.rx_bytes += length;
-			frames_processed++;
 		}
+		frames_processed++;
 	}
 
 	ibmveth_replenish_task(adapter);
