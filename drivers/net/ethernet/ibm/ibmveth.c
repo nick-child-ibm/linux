@@ -465,34 +465,58 @@ static void ibmveth_rxq_harvest_buffer(struct ibmveth_adapter *adapter)
 
 static void ibmveth_free_tx_ltb(struct ibmveth_adapter *adapter, int idx)
 {
-	dma_unmap_single(&adapter->vdev->dev, adapter->tx_ltb_dma[idx],
-			 adapter->tx_ltb_size, DMA_TO_DEVICE);
-	kfree(adapter->tx_ltb_ptr[idx]);
-	adapter->tx_ltb_ptr[idx] = NULL;
+	struct ibmveth_tx_ltb *q = &adapter->tx_ltb_queue[idx];
+
+	for (int i = 0; i < IBMVETH_MAX_BATCH_TX; i++) {
+		dma_unmap_single(&adapter->vdev->dev, q->tx_ltb_dma[i],
+				 adapter->tx_ltb_size, DMA_TO_DEVICE);
+		kfree(q->tx_ltb_ptr[i]);
+		q->tx_ltb_ptr[i] = NULL;
+		q->batch_idx = 0;
+		q->batched_bytes = 0;
+		memset(q->desc, 0, sizeof(*q->desc) *  IBMVETH_MAX_BATCH_TX);
+	}
 }
 
 static int ibmveth_allocate_tx_ltb(struct ibmveth_adapter *adapter, int idx)
 {
-	adapter->tx_ltb_ptr[idx] = kzalloc(adapter->tx_ltb_size,
-					   GFP_KERNEL);
-	if (!adapter->tx_ltb_ptr[idx]) {
-		netdev_err(adapter->netdev,
-			   "unable to allocate tx long term buffer\n");
-		return -ENOMEM;
-	}
-	adapter->tx_ltb_dma[idx] = dma_map_single(&adapter->vdev->dev,
-						  adapter->tx_ltb_ptr[idx],
+	struct ibmveth_tx_ltb *q = &adapter->tx_ltb_queue[idx];
+	int i;
+	for (i = 0; i < IBMVETH_MAX_BATCH_TX; i++) {
+		q->tx_ltb_ptr[i] = kzalloc(adapter->tx_ltb_size, GFP_KERNEL);
+		if (!q->tx_ltb_ptr[i]) {
+			netdev_err(adapter->netdev,
+				   "unable to allocate tx long term buffer\n");
+			goto err;
+		}
+		q->tx_ltb_dma[i] = dma_map_single(&adapter->vdev->dev,
+						  q->tx_ltb_ptr[i],
 						  adapter->tx_ltb_size,
 						  DMA_TO_DEVICE);
-	if (dma_mapping_error(&adapter->vdev->dev, adapter->tx_ltb_dma[idx])) {
-		netdev_err(adapter->netdev,
-			   "unable to DMA map tx long term buffer\n");
-		kfree(adapter->tx_ltb_ptr[idx]);
-		adapter->tx_ltb_ptr[idx] = NULL;
-		return -ENOMEM;
-	}
+		if (dma_mapping_error(&adapter->vdev->dev, q->tx_ltb_dma[i])) {
+			netdev_err(adapter->netdev,
+				   "unable to DMA map tx long term buffer\n");
+			kfree(q->tx_ltb_ptr[i]);
+			q->tx_ltb_ptr[i] = NULL;
+			goto err;
+		}
 
+	}
+	netdev_tx_reset_queue(netdev_get_tx_queue(adapter->netdev, idx));
+	q->batch_idx = 0;
+	q->batched_bytes = 0;
+	memset(q->desc, 0, sizeof(*q->desc) *  IBMVETH_MAX_BATCH_TX);
 	return 0;
+
+err:
+	while (--i >= 0) {
+		dma_unmap_single(&adapter->vdev->dev, q->tx_ltb_dma[i],
+				 adapter->tx_ltb_size, DMA_TO_DEVICE);
+		kfree(q->tx_ltb_ptr[i]);
+		q->tx_ltb_ptr[i] = NULL;
+	}
+	return -ENOMEM;
+
 }
 
 static int ibmveth_register_logical_lan(struct ibmveth_adapter *adapter,
@@ -1018,7 +1042,7 @@ static int ibmveth_set_channels(struct net_device *netdev,
 
 	/* Allocate any queue that we need */
 	for (i = old; i < goal; i++) {
-		if (adapter->tx_ltb_ptr[i])
+		if (adapter->tx_ltb_queue[i].tx_ltb_ptr[0])
 			continue;
 
 		rc = ibmveth_allocate_tx_ltb(adapter, i);
@@ -1041,7 +1065,7 @@ static int ibmveth_set_channels(struct net_device *netdev,
 	}
 	/* Free any that are no longer needed */
 	for (i = old; i > goal; i--) {
-		if (adapter->tx_ltb_ptr[i - 1])
+		if (adapter->tx_ltb_queue[i - 1].tx_ltb_ptr[0])
 			ibmveth_free_tx_ltb(adapter, i - 1);
 	}
 
@@ -1068,7 +1092,7 @@ static int ibmveth_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 }
 
 static int ibmveth_send(struct ibmveth_adapter *adapter,
-			unsigned long desc, unsigned long mss)
+			union ibmveth_buf_desc *descs, unsigned long mss)
 {
 	unsigned long correlator;
 	unsigned int retry_count;
@@ -1081,9 +1105,16 @@ static int ibmveth_send(struct ibmveth_adapter *adapter,
 	retry_count = 1024;
 	correlator = 0;
 	do {
-		ret = h_send_logical_lan(adapter->vdev->unit_address, desc,
-					 correlator, &correlator, mss,
-					 adapter->fw_large_send_support);
+		/* We are allowed to send 6 descriptors BUT the last one MUST
+		 * be zero to signal the end of the descriptors. IOW we really
+		 * can only send 5
+		 */
+		ret = h_send_logical_lan(adapter->vdev->unit_address,
+					     descs[0].desc, descs[1].desc,
+					     descs[2].desc, descs[3].desc,
+					     descs[4].desc, 0,
+					     correlator, &correlator, mss,
+					     adapter->fw_large_send_support);
 	} while ((ret == H_BUSY) && (retry_count--));
 
 	if (ret != H_SUCCESS && ret != H_DROPPED) {
@@ -1116,10 +1147,12 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 				      struct net_device *netdev)
 {
 	struct ibmveth_adapter *adapter = netdev_priv(netdev);
+	int i, queue_num = skb_get_queue_mapping(skb);
 	unsigned int desc_flags, total_bytes;
 	union ibmveth_buf_desc desc;
-	int i, queue_num = skb_get_queue_mapping(skb);
+	struct ibmveth_tx_ltb *q;
 	unsigned long mss = 0;
+	unsigned char *dest;
 
 	if (ibmveth_is_packet_unsupported(skb, netdev))
 		goto out;
@@ -1175,13 +1208,15 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 		netdev->stats.tx_dropped++;
 		goto out;
 	}
-	memcpy(adapter->tx_ltb_ptr[queue_num], skb->data, skb_headlen(skb));
+	q = &adapter->tx_ltb_queue[queue_num];
+	dest = q->tx_ltb_ptr[q->batch_idx];
+	memcpy(dest, skb->data, skb_headlen(skb));
 	total_bytes = skb_headlen(skb);
 	/* Copy frags into mapped buffers */
 	for (i = 0; i < skb_shinfo(skb)->nr_frags; i++) {
 		const skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
 
-		memcpy(adapter->tx_ltb_ptr[queue_num] + total_bytes,
+		memcpy(dest + total_bytes,
 		       skb_frag_address_safe(frag), skb_frag_size(frag));
 		total_bytes += skb_frag_size(frag);
 	}
@@ -1193,17 +1228,36 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 		goto out;
 	}
 	desc.fields.flags_len = desc_flags | skb->len;
-	desc.fields.address = adapter->tx_ltb_dma[queue_num];
+	desc.fields.address = q->tx_ltb_dma[q->batch_idx];
+	q->desc[q->batch_idx] = desc;
+
+	q->batch_idx++;
+	q->batched_bytes += skb->len;
+
+	if (!__netdev_tx_sent_queue(netdev_get_tx_queue(adapter->netdev, queue_num),
+				   skb->len, netdev_xmit_more() &&
+				   q->batch_idx < IBMVETH_MAX_BATCH_TX)) {
+	/* exit early if we can xmit next time */
+	//if (netdev_xmit_more() && q->batch_idx < IBMVETH_MAX_BATCH_TX) {
+		netdev_dbg(adapter->netdev, "BATCHING [%d]: %d", queue_num, q->batch_idx - 1);
+		goto out; 
+	}
+
 	/* finish writing to long_term_buff before VIOS accessing it */
 	dma_wmb();
 
-	if (ibmveth_send(adapter, desc.desc, mss)) {
+	if (ibmveth_send(adapter, q->desc, mss)) {
 		adapter->tx_send_failed++;
-		netdev->stats.tx_dropped++;
+		netdev->stats.tx_dropped += q->batch_idx;
 	} else {
-		netdev->stats.tx_packets++;
-		netdev->stats.tx_bytes += skb->len;
+		netdev->stats.tx_packets += q->batch_idx;
+		netdev->stats.tx_bytes += q->batched_bytes;
 	}
+	netdev_tx_completed_queue(netdev_get_tx_queue(adapter->netdev, queue_num),
+		q->batch_idx, q->batched_bytes);
+	q->batch_idx = 0;
+	q->batched_bytes = 0;
+	memset(q->desc, 0, sizeof(*q->desc) *  IBMVETH_MAX_BATCH_TX);
 
 out:
 	dev_consume_skb_any(skb);
@@ -1590,7 +1644,8 @@ static unsigned long ibmveth_get_desired_dma(struct vio_dev *vdev)
 	ret = IBMVETH_BUFF_LIST_SIZE + IBMVETH_FILT_LIST_SIZE;
 	ret += IOMMU_PAGE_ALIGN(netdev->mtu, tbl);
 	/* add size of mapped tx buffers */
-	ret += IOMMU_PAGE_ALIGN(IBMVETH_MAX_TX_BUF_SIZE, tbl);
+	for (i = 0; i < IBMVETH_MAX_BATCH_TX * IBMVETH_MAX_QUEUES; i++)
+		ret += IOMMU_PAGE_ALIGN(IBMVETH_MAX_TX_BUF_SIZE, tbl);
 
 	for (i = 0; i < IBMVETH_NUM_BUFF_POOLS; i++) {
 		/* add the size of the active receive buffers */
@@ -1648,7 +1703,7 @@ static const struct net_device_ops ibmveth_netdev_ops = {
 
 static int ibmveth_probe(struct vio_dev *dev, const struct vio_device_id *id)
 {
-	int rc, i, mac_len;
+	int rc, i, j, mac_len;
 	struct net_device *netdev;
 	struct ibmveth_adapter *adapter;
 	unsigned char *mac_addr_p;
@@ -1758,7 +1813,8 @@ static int ibmveth_probe(struct vio_dev *dev, const struct vio_device_id *id)
 	}
 	adapter->tx_ltb_size = PAGE_ALIGN(IBMVETH_MAX_TX_BUF_SIZE);
 	for (i = 0; i < IBMVETH_MAX_QUEUES; i++)
-		adapter->tx_ltb_ptr[i] = NULL;
+		for (j = 0; j < IBMVETH_MAX_BATCH_TX; j++)
+			adapter->tx_ltb_queue[i].tx_ltb_ptr[j] = NULL;
 
 	netdev_dbg(netdev, "adapter @ 0x%p\n", adapter);
 	netdev_dbg(netdev, "registering netdev...\n");
