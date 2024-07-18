@@ -60,7 +60,7 @@ module_param(tx_copybreak, uint, 0644);
 MODULE_PARM_DESC(tx_copybreak,
 	"Maximum size of packet that is copied to a new buffer on transmit");
 
-static unsigned int rx_copybreak __read_mostly = 128;
+static unsigned int rx_copybreak __read_mostly = 4096;
 module_param(rx_copybreak, uint, 0644);
 MODULE_PARM_DESC(rx_copybreak,
 	"Maximum size of packet that is copied to a new buffer on receive");
