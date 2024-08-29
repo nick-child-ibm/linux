@@ -163,6 +163,9 @@ struct ibmveth_adapter {
     struct rx_donation *donation_head;
     struct rx_donation *donation_tail;
 
+    u64 donated_rx_none;
+    u64 donated_rx_found;
+    u64 donated_rx_no_match;
     u64 fw_ipv6_csum_support;
     u64 fw_ipv4_csum_support;
     u64 fw_large_send_support;

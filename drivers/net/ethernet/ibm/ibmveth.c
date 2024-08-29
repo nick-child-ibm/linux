@@ -97,7 +97,10 @@ static struct ibmveth_stat ibmveth_stats[] = {
 	{ "fw_enabled_ipv6_csum", IBMVETH_STAT_OFF(fw_ipv6_csum_support) },
 	{ "tx_large_packets", IBMVETH_STAT_OFF(tx_large_packets) },
 	{ "rx_large_packets", IBMVETH_STAT_OFF(rx_large_packets) },
-	{ "fw_enabled_large_send", IBMVETH_STAT_OFF(fw_large_send_support) }
+	{ "fw_enabled_large_send", IBMVETH_STAT_OFF(fw_large_send_support) },
+	{ "donated_rx_found", IBMVETH_STAT_OFF(donated_rx_found) },
+	{ "donated_rx_none", IBMVETH_STAT_OFF(donated_rx_none) },
+	{ "donated_rx_no_match", IBMVETH_STAT_OFF(donated_rx_none) }
 };
 
 /* simple methods of getting data from the current rxq entry */
@@ -166,6 +169,9 @@ static void reset_rx_donations(struct ibmveth_adapter *adapter)
 	atomic_set(&adapter->n_rx_donations, 0);
 	adapter->donation_tail = NULL;
 	adapter->donation_head = NULL;
+	adapter->donated_rx_found = 0;
+	adapter->donated_rx_none = 0;
+	adapter->donated_rx_no_match = 0;
 	spin_unlock(&adapter->donation_lock);
 
 }
@@ -176,67 +182,47 @@ static struct sk_buff * harvest_rx_donation(struct ibmveth_adapter *adapter,
 	struct rx_donation *tmp = adapter->donation_head, *prev = NULL;
 	struct sk_buff *skb = NULL;
 
-	printk(KERN_ERR "IN\n");
-
 	if (!atomic_read(&adapter->n_rx_donations)) {
-		printk(KERN_ERR "OUT NONE\n");
-
+		adapter->donated_rx_none++;
 		return NULL;
 	}
-	printk(KERN_ERR "HERE 1\n");
 	spin_lock(&adapter->donation_lock);
-	printk(KERN_ERR "HERE 2\n");
 
 	while (tmp) {
-		printk(KERN_ERR "LOOP 1\n");
 
 		BUG_ON(!tmp->skb);
-		if (tmp->skb->len < min_len) {
+		if (tmp->skb->truesize <= min_len) {
 			prev = tmp;
 			tmp = tmp->next;
 			continue;
 		}
-				printk(KERN_ERR "LOOP 2\n");
 
 		if (adapter->donation_head == adapter->donation_tail) {
-					printk(KERN_ERR "LOOP 3\n");
-
 			adapter->donation_head = NULL;
 			adapter->donation_tail = NULL;
-
-		}
-		else if (tmp == adapter->donation_head)
+		} else if (tmp == adapter->donation_head)
 			adapter->donation_head = tmp->next;
 		else if (tmp == adapter->donation_tail) {
-					printk(KERN_ERR "LOOP 4\n");
-
 			adapter->donation_tail = prev;
 			prev->next = NULL;
-		}
-		else {
-					printk(KERN_ERR "LOOP 5\n");
-
+		} else {
 			prev->next = tmp->next;
 		}
-				printk(KERN_ERR "LOOP 6\n");
 
 		skb = tmp->skb;
-				printk(KERN_ERR "LOOP 7\n");
-				printk(KERN_ERR "FREEIN %d: %p", atomic_read(&adapter->n_rx_donations), tmp);
+
 
 		kfree(tmp);
-				printk(KERN_ERR "LOOP 8\n");
 
 		atomic_dec(&adapter->n_rx_donations);
-				printk(KERN_ERR "LOOP 9\n");
-
+		adapter->donated_rx_found++;
 		break;
 	}
-			printk(KERN_ERR "LOOP 10\n");
 
 	spin_unlock(&adapter->donation_lock);
 
-	printk(KERN_ERR "OUT\n");
+	if (!skb)
+		adapter->donated_rx_no_match++;
 
 	return skb;
 }
@@ -1039,13 +1025,16 @@ static void ibmveth_get_strings(struct net_device *dev, u32 stringset, u8 *data)
 
 	for (i = 0; i < ARRAY_SIZE(ibmveth_stats); i++, data += ETH_GSTRING_LEN)
 		memcpy(data, ibmveth_stats[i].name, ETH_GSTRING_LEN);
+
+	memcpy(data, "curr_n_rx_donations", ETH_GSTRING_LEN);
+	data += ETH_GSTRING_LEN;
 }
 
 static int ibmveth_get_sset_count(struct net_device *dev, int sset)
 {
 	switch (sset) {
 	case ETH_SS_STATS:
-		return ARRAY_SIZE(ibmveth_stats);
+		return ARRAY_SIZE(ibmveth_stats) + 1;
 	default:
 		return -EOPNOTSUPP;
 	}
@@ -1059,6 +1048,8 @@ static void ibmveth_get_ethtool_stats(struct net_device *dev,
 
 	for (i = 0; i < ARRAY_SIZE(ibmveth_stats); i++)
 		data[i] = IBMVETH_GET_STAT(adapter, ibmveth_stats[i].offset);
+
+	data[i++] = atomic_read(&adapter->n_rx_donations);
 }
 
 static void ibmveth_get_channels(struct net_device *netdev,
@@ -1280,14 +1271,15 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 	}
 
 out:
-	if (!skb_shinfo(skb)->nr_frags && skb->len >= rx_copybreak
+	if (!skb_shinfo(skb)->nr_frags
+	    && skb->truesize >= rx_copybreak
 	   && atomic_read(&adapter->n_rx_donations) < IBMVETH_MAX_RX_DONATIONS) {
 	   	spin_lock(&adapter->donation_lock);
-
 		struct rx_donation *new = kmalloc(sizeof(struct rx_donation),
 						  GFP_KERNEL);
 		new->skb = skb;
 		new->next = NULL;
+		skb_reset_tail_pointer(skb);
 		if (!adapter->donation_head) {
 			adapter->donation_head = new;
 		} else if (!adapter->donation_tail) {
@@ -1298,7 +1290,6 @@ out:
 			adapter->donation_tail = new;
 		}
 		atomic_inc(&adapter->n_rx_donations);
-		printk(KERN_ERR "ADDED %d: %p", atomic_read(&adapter->n_rx_donations), new);
 		spin_unlock(&adapter->donation_lock);
 
 	} else {
@@ -1468,15 +1459,10 @@ restart_poll:
 
 			new_skb = NULL;
 			if (length < rx_copybreak) {
-				printk(KERN_ERR "GETTING\n");
 				new_skb = harvest_rx_donation(adapter, length);
 				if (!new_skb)
 					new_skb = netdev_alloc_skb(netdev,
 								   length);
-				else{
-					printk(KERN_ERR "GOT PRNT:\n");
-					printk(KERN_ERR "GOT %p\n", new_skb);
-				}
 			}
 
 			if (new_skb) {
