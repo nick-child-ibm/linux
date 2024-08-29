@@ -101,6 +101,7 @@ static inline long h_illan_attributes(unsigned long unit_address,
 #define IBMVETH_MAX_TX_BUF_SIZE (1024 * 64)
 #define IBMVETH_MAX_QUEUES 16U
 #define IBMVETH_DEFAULT_QUEUES 8U
+#define IBMVETH_MAX_RX_DONATIONS 1024
 
 static int pool_size[] = { 512, 1024 * 2, 1024 * 16, 1024 * 32, 1024 * 64 };
 static int pool_count[] = { 256, 512, 256, 256, 256 };
@@ -133,6 +134,11 @@ struct ibmveth_rx_q {
     struct ibmveth_rx_q_entry *queue_addr;
 };
 
+struct rx_donation {
+	struct sk_buff *skb;
+	struct rx_donation *next;
+};
+
 struct ibmveth_adapter {
     struct vio_dev *vdev;
     struct net_device *netdev;
@@ -141,6 +147,7 @@ struct ibmveth_adapter {
     void * buffer_list_addr;
     void * filter_list_addr;
     void *tx_ltb_ptr[IBMVETH_MAX_QUEUES];
+
     unsigned int tx_ltb_size;
     dma_addr_t tx_ltb_dma[IBMVETH_MAX_QUEUES];
     dma_addr_t buffer_list_dma;
@@ -150,6 +157,11 @@ struct ibmveth_adapter {
     int rx_csum;
     int large_send;
     bool is_active_trunk;
+
+	atomic_t n_rx_donations;
+	spinlock_t donation_lock;
+    struct rx_donation *donation_head;
+    struct rx_donation *donation_tail;
 
     u64 fw_ipv6_csum_support;
     u64 fw_ipv4_csum_support;

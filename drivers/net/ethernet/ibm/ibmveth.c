@@ -149,6 +149,98 @@ static unsigned int ibmveth_real_max_tx_queues(void)
 	return min(n_cpu, IBMVETH_MAX_QUEUES);
 }
 
+static void reset_rx_donations(struct ibmveth_adapter *adapter)
+{
+	struct rx_donation *tmp = adapter->donation_head;
+	unsigned long flags;
+
+	spin_lock(&adapter->donation_lock);
+
+	while (tmp) {
+		dev_kfree_skb_any(tmp->skb);
+		adapter->donation_head = tmp->next;
+		kfree(tmp);
+		tmp = adapter->donation_head;
+	}
+
+	atomic_set(&adapter->n_rx_donations, 0);
+	adapter->donation_tail = NULL;
+	adapter->donation_head = NULL;
+	spin_unlock(&adapter->donation_lock);
+
+}
+
+static struct sk_buff * harvest_rx_donation(struct ibmveth_adapter *adapter,
+				    int min_len)
+{
+	struct rx_donation *tmp = adapter->donation_head, *prev = NULL;
+	struct sk_buff *skb = NULL;
+
+	printk(KERN_ERR "IN\n");
+
+	if (!atomic_read(&adapter->n_rx_donations)) {
+		printk(KERN_ERR "OUT NONE\n");
+
+		return NULL;
+	}
+	printk(KERN_ERR "HERE 1\n");
+	spin_lock(&adapter->donation_lock);
+	printk(KERN_ERR "HERE 2\n");
+
+	while (tmp) {
+		printk(KERN_ERR "LOOP 1\n");
+
+		BUG_ON(!tmp->skb);
+		if (tmp->skb->len < min_len) {
+			prev = tmp;
+			tmp = tmp->next;
+			continue;
+		}
+				printk(KERN_ERR "LOOP 2\n");
+
+		if (adapter->donation_head == adapter->donation_tail) {
+					printk(KERN_ERR "LOOP 3\n");
+
+			adapter->donation_head = NULL;
+			adapter->donation_tail = NULL;
+
+		}
+		else if (tmp == adapter->donation_head)
+			adapter->donation_head = tmp->next;
+		else if (tmp == adapter->donation_tail) {
+					printk(KERN_ERR "LOOP 4\n");
+
+			adapter->donation_tail = prev;
+			prev->next = NULL;
+		}
+		else {
+					printk(KERN_ERR "LOOP 5\n");
+
+			prev->next = tmp->next;
+		}
+				printk(KERN_ERR "LOOP 6\n");
+
+		skb = tmp->skb;
+				printk(KERN_ERR "LOOP 7\n");
+				printk(KERN_ERR "FREEIN %d: %p", atomic_read(&adapter->n_rx_donations), tmp);
+
+		kfree(tmp);
+				printk(KERN_ERR "LOOP 8\n");
+
+		atomic_dec(&adapter->n_rx_donations);
+				printk(KERN_ERR "LOOP 9\n");
+
+		break;
+	}
+			printk(KERN_ERR "LOOP 10\n");
+
+	spin_unlock(&adapter->donation_lock);
+
+	printk(KERN_ERR "OUT\n");
+
+	return skb;
+}
+
 /* setup the initial settings for a buffer pool */
 static void ibmveth_init_buffer_pool(struct ibmveth_buff_pool *pool,
 				     u32 pool_index, u32 pool_size,
@@ -569,6 +661,10 @@ static int ibmveth_open(struct net_device *netdev)
 					adapter->rx_queue.queue_len;
 	rxq_desc.fields.address = adapter->rx_queue.queue_dma;
 
+	spin_lock_init(&adapter->donation_lock);
+	adapter->donation_head = NULL;
+	reset_rx_donations(adapter);
+
 	netdev_dbg(netdev, "buffer list @ 0x%p\n", adapter->buffer_list_addr);
 	netdev_dbg(netdev, "filter list @ 0x%p\n", adapter->filter_list_addr);
 	netdev_dbg(netdev, "receive q   @ 0x%p\n", adapter->rx_queue.queue_addr);
@@ -704,6 +800,7 @@ static int ibmveth_close(struct net_device *netdev)
 	for (i = 0; i < netdev->real_num_tx_queues; i++)
 		ibmveth_free_tx_ltb(adapter, i);
 
+	reset_rx_donations(adapter);
 	netdev_dbg(netdev, "close complete\n");
 
 	return 0;
@@ -1183,7 +1280,30 @@ static netdev_tx_t ibmveth_start_xmit(struct sk_buff *skb,
 	}
 
 out:
-	dev_consume_skb_any(skb);
+	if (!skb_shinfo(skb)->nr_frags && skb->len >= rx_copybreak
+	   && atomic_read(&adapter->n_rx_donations) < IBMVETH_MAX_RX_DONATIONS) {
+	   	spin_lock(&adapter->donation_lock);
+
+		struct rx_donation *new = kmalloc(sizeof(struct rx_donation),
+						  GFP_KERNEL);
+		new->skb = skb;
+		new->next = NULL;
+		if (!adapter->donation_head) {
+			adapter->donation_head = new;
+		} else if (!adapter->donation_tail) {
+			adapter->donation_tail = new;
+			adapter->donation_head->next = new;
+		} else {
+			adapter->donation_tail->next = new;
+			adapter->donation_tail = new;
+		}
+		atomic_inc(&adapter->n_rx_donations);
+		printk(KERN_ERR "ADDED %d: %p", atomic_read(&adapter->n_rx_donations), new);
+		spin_unlock(&adapter->donation_lock);
+
+	} else {
+		dev_consume_skb_irq(skb);
+	}
 	return NETDEV_TX_OK;
 
 
@@ -1347,8 +1467,17 @@ restart_poll:
 			}
 
 			new_skb = NULL;
-			if (length < rx_copybreak)
-				new_skb = netdev_alloc_skb(netdev, length);
+			if (length < rx_copybreak) {
+				printk(KERN_ERR "GETTING\n");
+				new_skb = harvest_rx_donation(adapter, length);
+				if (!new_skb)
+					new_skb = netdev_alloc_skb(netdev,
+								   length);
+				else{
+					printk(KERN_ERR "GOT PRNT:\n");
+					printk(KERN_ERR "GOT %p\n", new_skb);
+				}
+			}
 
 			if (new_skb) {
 				skb_copy_to_linear_data(new_skb,
