@@ -102,7 +102,9 @@ static inline long h_illan_attributes(unsigned long unit_address,
 #define IBMVETH_MAX_QUEUES 16U
 #define IBMVETH_DEFAULT_QUEUES 8U
 
-static int pool_size[] = { 512, 1024 * 2, 1024 * 16, 1024 * 32, 1024 * 64 };
+// static int pool_size[] = { 512, 1024 * 2, 1024 * 16, 1024 * 32, 1024 * 64 };
+//static int pool_size[] = { PAGE_SIZE / 8, PAGE_SIZE / 2, PAGE_SIZE, PAGE_SIZE * 8, PAGE_SIZE * 16 };
+static int pool_size[] = { PAGE_SIZE / 8, PAGE_SIZE / 2, PAGE_SIZE, PAGE_SIZE, PAGE_SIZE};
 static int pool_count[] = { 256, 512, 256, 256, 256 };
 static int pool_count_cmo[] = { 256, 512, 256, 256, 64 };
 static int pool_active[] = { 1, 1, 0, 0, 1};
@@ -138,6 +140,7 @@ struct ibmveth_adapter {
     struct net_device *netdev;
     struct napi_struct napi;
     unsigned int mcastFilterSize;
+    struct page_pool *pp;
     void * buffer_list_addr;
     void * filter_list_addr;
     void *tx_ltb_ptr[IBMVETH_MAX_QUEUES];

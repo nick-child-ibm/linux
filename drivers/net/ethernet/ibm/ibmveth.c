@@ -35,6 +35,8 @@
 #include <asm/firmware.h>
 #include <net/tcp.h>
 #include <net/ip6_checksum.h>
+#include <net/page_pool/helpers.h>
+
 
 #include "ibmveth.h"
 
@@ -149,6 +151,39 @@ static unsigned int ibmveth_real_max_tx_queues(void)
 	return min(n_cpu, IBMVETH_MAX_QUEUES);
 }
 
+static int ibmveth_setup_pp(struct ibmveth_adapter *adapter)
+{
+	int rc = 0, entries = 0;
+	struct page_pool_params pp_params = { 0 };
+
+	for (int i = 0; i < IBMVETH_NUM_BUFF_POOLS; i++)
+		entries += adapter->rx_buff_pool[i].size;
+
+	pp_params.order = 0; /* 2^order pages to allocate */
+	pp_params.pool_size = entries;
+	pp_params.nid = NUMA_NO_NODE; /* numa ID, TODO */
+	pp_params.dev = &adapter->vdev->dev;
+	pp_params.dma_dir = DMA_BIDIRECTIONAL;
+	pp_params.max_len = PAGE_SIZE;
+	pp_params.offset = 0;
+	pp_params.netdev = adapter->netdev;
+	pp_params.flags = PP_FLAG_DMA_MAP;
+
+	adapter->pp = page_pool_create(&pp_params);
+	if (IS_ERR(adapter->pp)) {
+		rc = PTR_ERR(adapter->pp);
+		adapter->pp = NULL;
+	}
+
+	return rc;
+}
+
+static void ibmveth_release_pp(struct ibmveth_adapter *adapter)
+{
+	page_pool_destroy(adapter->pp);
+	adapter->pp = NULL;
+}
+
 /* setup the initial settings for a buffer pool */
 static void ibmveth_init_buffer_pool(struct ibmveth_buff_pool *pool,
 				     u32 pool_index, u32 pool_size,
@@ -221,6 +256,8 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 	u64 correlator;
 	unsigned long lpar_rc;
 	dma_addr_t dma_addr;
+	unsigned char *ptr;
+	unsigned int size;
 
 	mb();
 
@@ -237,23 +274,28 @@ static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 		if (pool->skbuff[index])
 			goto reuse;
 
-		skb = netdev_alloc_skb(adapter->netdev, pool->buff_size);
-
+		size = pool->buff_size;
+		ptr = page_pool_dev_alloc_va(adapter->pp, &size);
+		if (size != pool->buff_size) {
+			netdev_err(adapter->netdev,
+				"failed to alloc full size through page pool %d < %d\n",
+				size, pool->buff_size);
+			adapter->replenish_no_mem++;
+			page_pool_free_va(adapter->pp, ptr, true);
+			break;
+		}
+		skb =  build_skb(ptr, size);
 		if (!skb) {
 			netdev_dbg(adapter->netdev,
 				   "replenish: unable to allocate skb\n");
 			adapter->replenish_no_mem++;
+			page_pool_free_va(adapter->pp, ptr, true);
 			break;
 		}
 
-		dma_addr = dma_map_single(&adapter->vdev->dev, skb->data,
-				pool->buff_size, DMA_FROM_DEVICE);
-
-		if (dma_mapping_error(&adapter->vdev->dev, dma_addr))
-			goto failure;
-
-		pool->dma_addr[index] = dma_addr;
+		pool->dma_addr[index] = page_pool_get_dma_addr(virt_to_head_page(ptr));
 		pool->skbuff[index] = skb;
+		skb_mark_for_recycle(skb);
 
 		if (rx_flush) {
 			unsigned int len = min(pool->buff_size,
@@ -293,11 +335,7 @@ reuse:
 	return;
 
 failure:
-
-	if (dma_addr && !dma_mapping_error(&adapter->vdev->dev, dma_addr))
-		dma_unmap_single(&adapter->vdev->dev,
-		                 pool->dma_addr[index], pool->buff_size,
-		                 DMA_FROM_DEVICE);
+	page_pool_free_va(adapter->pp, pool->skbuff[index]->head, false);
 	dev_kfree_skb_any(pool->skbuff[index]);
 	pool->skbuff[index] = NULL;
 	adapter->replenish_add_buff_failure++;
@@ -349,10 +387,9 @@ static void ibmveth_free_buffer_pool(struct ibmveth_adapter *adapter,
 		for (i = 0; i < pool->size; ++i) {
 			struct sk_buff *skb = pool->skbuff[i];
 			if (skb) {
-				dma_unmap_single(&adapter->vdev->dev,
-						 pool->dma_addr[i],
-						 pool->buff_size,
-						 DMA_FROM_DEVICE);
+	//			page_pool_free_va(adapter->pp,
+	//			  skb->head,
+	//			  false);
 				dev_kfree_skb_any(skb);
 				pool->skbuff[i] = NULL;
 			}
@@ -393,12 +430,10 @@ static void ibmveth_remove_buffer_from_pool(struct ibmveth_adapter *adapter,
 		/* remove the skb pointer to mark free. actual freeing is done
 		 * by upper level networking after gro_recieve
 		 */
+		//page_pool_free_va(adapter->pp,
+		//		  adapter->rx_buff_pool[pool].skbuff[index]->head,
+		//		  true);
 		adapter->rx_buff_pool[pool].skbuff[index] = NULL;
-
-		dma_unmap_single(&adapter->vdev->dev,
-				 adapter->rx_buff_pool[pool].dma_addr[index],
-				 adapter->rx_buff_pool[pool].buff_size,
-				 DMA_FROM_DEVICE);
 	}
 
 	free_index = adapter->rx_buff_pool[pool].producer_index;
@@ -419,7 +454,7 @@ static inline struct sk_buff *ibmveth_rxq_get_buffer(struct ibmveth_adapter *ada
 	u64 correlator = adapter->rx_queue.queue_addr[adapter->rx_queue.index].correlator;
 	unsigned int pool = correlator >> 32;
 	unsigned int index = correlator & 0xffffffffUL;
-
+	//printk(KERN_ERR "[%lu] = [%u][%u]\n", correlator, pool, index);
 	BUG_ON(pool >= IBMVETH_NUM_BUFF_POOLS);
 	BUG_ON(index >= adapter->rx_buff_pool[pool].size);
 
@@ -590,6 +625,10 @@ static int ibmveth_open(struct net_device *netdev)
 		goto out_unmap_filter_list;
 	}
 
+	rc = ibmveth_setup_pp(adapter);
+	if (rc)
+		goto out_unmap_filter_list;
+
 	for (i = 0; i < IBMVETH_NUM_BUFF_POOLS; i++) {
 		if (!adapter->rx_buff_pool[i].active)
 			continue;
@@ -631,6 +670,7 @@ out_free_buffer_pools:
 			ibmveth_free_buffer_pool(adapter,
 						 &adapter->rx_buff_pool[i]);
 	}
+	ibmveth_release_pp(adapter);
 out_unmap_filter_list:
 	dma_unmap_single(dev, adapter->filter_list_dma, 4096,
 			 DMA_BIDIRECTIONAL);
@@ -700,6 +740,8 @@ static int ibmveth_close(struct net_device *netdev)
 		if (adapter->rx_buff_pool[i].active)
 			ibmveth_free_buffer_pool(adapter,
 						 &adapter->rx_buff_pool[i]);
+
+	ibmveth_release_pp(adapter);
 
 	for (i = 0; i < netdev->real_num_tx_queues; i++)
 		ibmveth_free_tx_ltb(adapter, i);
@@ -1313,9 +1355,11 @@ static int ibmveth_poll(struct napi_struct *napi, int budget)
 	int frames_processed = 0;
 	unsigned long lpar_rc;
 	u16 mss = 0;
-
+	//printk(KERN_ERR "POLL START\n");
 restart_poll:
 	while (frames_processed < budget) {
+			//printk(KERN_ERR "POLL LOOP %d\n", frames_processed);
+
 		if (!ibmveth_rxq_pending_buffer(adapter))
 			break;
 
@@ -1334,7 +1378,7 @@ restart_poll:
 			__sum16 iph_check = 0;
 
 			skb = ibmveth_rxq_get_buffer(adapter);
-
+			//printk(KERN_ERR "GOT %p!\n", skb);
 			/* if the large packet bit is set in the rx queue
 			 * descriptor, the mss will be written by PHYP eight
 			 * bytes from the start of the rx buffer, which is
