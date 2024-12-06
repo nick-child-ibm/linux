@@ -980,6 +980,7 @@ struct ibmvnic_adapter {
 	/* Used for serialization of device commands */
 	struct mutex fw_lock;
 	int fw_done_rc;
+	struct mutex reset_lock;
 
 	struct completion reset_done;
 	int reset_done_rc;
