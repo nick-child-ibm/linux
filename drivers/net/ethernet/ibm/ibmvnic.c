@@ -69,6 +69,7 @@
 #include <linux/if_vlan.h>
 #include <linux/utsname.h>
 #include <linux/cpu.h>
+#include <linux/printk.h>
 
 #include "ibmvnic.h"
 
@@ -4834,6 +4835,7 @@ static int send_login(struct ibmvnic_adapter *adapter)
 	struct device *dev = &adapter->vdev->dev;
 	struct vnic_login_client_data *vlcd;
 	dma_addr_t rsp_buffer_token;
+	unsigned char hex_str[16*3];
 	dma_addr_t buffer_token;
 	size_t rsp_buffer_size;
 	union ibmvnic_crq crq;
@@ -4937,10 +4939,14 @@ static int send_login(struct ibmvnic_adapter *adapter)
 	vnic_add_client_data(adapter, vlcd);
 
 	netdev_dbg(adapter->netdev, "Login Buffer:\n");
-	for (i = 0; i < (adapter->login_buf_sz - 1) / 8 + 1; i++) {
+	for_each_line_in_hex_dump(i, 16, hex_str, sizeof(hex_str), 1,
+				  adapter->login_buf, adapter->login_buf_sz) {
+		netdev_dbg(adapter->netdev, "%s\n", hex_str);
+	}
+/*	for (i = 0; i < (adapter->login_buf_sz - 1) / 8 + 1; i++) {
 		netdev_dbg(adapter->netdev, "%016lx\n",
 			   ((unsigned long *)(adapter->login_buf))[i]);
-	}
+	}*/
 
 	memset(&crq, 0, sizeof(crq));
 	crq.login.first = IBMVNIC_CRQ_CMD;
