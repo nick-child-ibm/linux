@@ -132,7 +132,9 @@ int hex_dump_to_buffer(const void *buf, size_t len, int rowsize, int groupsize,
 	u8 ch;
 	int j, lx = 0;
 	int ascii_column;
+	int has_rem;
 	int ret;
+
 
 	if (rowsize != 16 && rowsize != 32)
 		rowsize = 16;
@@ -141,8 +143,7 @@ int hex_dump_to_buffer(const void *buf, size_t len, int rowsize, int groupsize,
 		len = rowsize;
 	if (!is_power_of_2(groupsize) || groupsize > 8)
 		groupsize = 1;
-	if ((len % groupsize) != 0)	/* no mixed size output */
-		groupsize = 1;
+	has_rem = len % groupsize;
 
 	ngroups = len / groupsize;
 	ascii_column = rowsize * 2 + rowsize / groupsize + 1;
@@ -164,6 +165,10 @@ int hex_dump_to_buffer(const void *buf, size_t len, int rowsize, int groupsize,
 				goto overflow1;
 			lx += ret;
 		}
+		if (has_rem) {
+			j *= groupsize;
+			goto print_rem;
+		}
 	} else if (groupsize == 4) {
 		const u32 *ptr4 = buf;
 
@@ -174,6 +179,10 @@ int hex_dump_to_buffer(const void *buf, size_t len, int rowsize, int groupsize,
 			if (ret >= linebuflen - lx)
 				goto overflow1;
 			lx += ret;
+		}
+		if (has_rem) {
+			j *= groupsize;
+			goto print_rem;
 		}
 	} else if (groupsize == 2) {
 		const u16 *ptr2 = buf;
@@ -186,8 +195,14 @@ int hex_dump_to_buffer(const void *buf, size_t len, int rowsize, int groupsize,
 				goto overflow1;
 			lx += ret;
 		}
+		if (has_rem) {
+			j *= groupsize;
+			goto print_rem;
+		}
 	} else {
-		for (j = 0; j < len; j++) {
+		j = 0;
+print_rem:
+		for (; j < len; j++) {
 			if (linebuflen < lx + 2)
 				goto overflow2;
 			ch = ptr[j];
@@ -197,7 +212,8 @@ int hex_dump_to_buffer(const void *buf, size_t len, int rowsize, int groupsize,
 			linebuf[lx++] = hex_asc_lo(ch);
 			if (linebuflen < lx + 2)
 				goto overflow2;
-			linebuf[lx++] = ' ';
+			if (groupsize == 1 || j == len - 1)
+				linebuf[lx++] = ' ';
 		}
 	}
 	if (j)	/* remove extra space char */
