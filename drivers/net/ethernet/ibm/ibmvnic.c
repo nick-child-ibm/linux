@@ -58,6 +58,7 @@
 #include <linux/seq_file.h>
 #include <linux/interrupt.h>
 #include <net/net_namespace.h>
+#include <net/netdev_lock.h>
 #include <asm/hvcall.h>
 #include <linux/atomic.h>
 #include <asm/vio.h>
@@ -1424,7 +1425,7 @@ static void ibmvnic_napi_enable(struct ibmvnic_adapter *adapter)
 		return;
 
 	for (i = 0; i < adapter->req_rx_queues; i++)
-		napi_enable(&adapter->napi[i]);
+		napi_enable_locked(&adapter->napi[i]);
 
 	adapter->napi_enabled = true;
 }
@@ -1438,7 +1439,7 @@ static void ibmvnic_napi_disable(struct ibmvnic_adapter *adapter)
 
 	for (i = 0; i < adapter->req_rx_queues; i++) {
 		netdev_dbg(adapter->netdev, "Disabling napi[%d]\n", i);
-		napi_disable(&adapter->napi[i]);
+		napi_disable_locked(&adapter->napi[i]);
 	}
 
 	adapter->napi_enabled = false;
@@ -1455,7 +1456,7 @@ static int init_napi(struct ibmvnic_adapter *adapter)
 
 	for (i = 0; i < adapter->req_rx_queues; i++) {
 		netdev_dbg(adapter->netdev, "Adding napi[%d]\n", i);
-		netif_napi_add(adapter->netdev, &adapter->napi[i],
+		netif_napi_add_locked(adapter->netdev, &adapter->napi[i],
 			       ibmvnic_poll);
 	}
 
@@ -1472,7 +1473,7 @@ static void release_napi(struct ibmvnic_adapter *adapter)
 
 	for (i = 0; i < adapter->num_active_rx_napi; i++) {
 		netdev_dbg(adapter->netdev, "Releasing napi[%d]\n", i);
-		netif_napi_del(&adapter->napi[i]);
+		netif_napi_del_locked(&adapter->napi[i]);
 	}
 
 	kfree(adapter->napi);
@@ -1928,18 +1929,11 @@ static int ibmvnic_open(struct net_device *netdev)
 	struct ibmvnic_adapter *adapter = netdev_priv(netdev);
 	int rc;
 
-	ASSERT_RTNL();
+	netdev_assert_locked(netdev);
 
 	/* If device failover is pending or we are about to reset, just set
 	 * device state and return. Device operation will be handled by reset
 	 * routine.
-	 *
-	 * It should be safe to overwrite the adapter->state here. Since
-	 * we hold the rtnl, either the reset has not actually started or
-	 * the rtnl got dropped during the set_link_state() in do_reset().
-	 * In the former case, no one else is changing the state (again we
-	 * have the rtnl) and in the latter case, do_reset() will detect and
-	 * honor our setting below.
 	 */
 	if (adapter->failover_pending || (test_bit(0, &adapter->resetting))) {
 		netdev_dbg(netdev, "[S:%s FOP:%d] Resetting, deferring open\n",
@@ -1967,7 +1961,7 @@ static int ibmvnic_open(struct net_device *netdev)
 out:
 	/* If open failed and there is a pending failover or in-progress reset,
 	 * set device state and return. Device operation will be handled by
-	 * reset routine. See also comments above regarding rtnl.
+	 * reset routine.
 	 */
 	if (rc &&
 	    (adapter->failover_pending || (test_bit(0, &adapter->resetting)))) {
@@ -2811,18 +2805,18 @@ static int do_reset(struct ibmvnic_adapter *adapter,
 		   adapter_state_to_string(reset_state));
 
 	adapter->reset_reason = rwi->reset_reason;
-	/* requestor of VNIC_RESET_CHANGE_PARAM already has the rtnl lock */
-	if (!(adapter->reset_reason == VNIC_RESET_CHANGE_PARAM))
-		rtnl_lock();
+	/* requestor of VNIC_RESET_CHANGE_PARAM already has the netdev lock */
+	if (adapter->reset_reason != VNIC_RESET_CHANGE_PARAM)
+		netdev_lock(netdev);
 
-	/* Now that we have the rtnl lock, clear any pending failover.
+	/* Now that we have the netdev lock, clear any pending failover.
 	 * This will ensure ibmvnic_open() has either completed or will
 	 * block until failover is complete.
 	 */
 	if (rwi->reset_reason == VNIC_RESET_FAILOVER)
 		adapter->failover_pending = false;
 
-	/* read the state and check (again) after getting rtnl */
+	/* read the state and check (again) after getting netdev lock */
 	reset_state = adapter->state;
 
 	if (reset_state == VNIC_REMOVING || reset_state == VNIC_REMOVED) {
@@ -2849,38 +2843,10 @@ static int do_reset(struct ibmvnic_adapter *adapter,
 		} else {
 			adapter->state = VNIC_CLOSING;
 
-			/* Release the RTNL lock before link state change and
-			 * re-acquire after the link state change to allow
-			 * linkwatch_event to grab the RTNL lock and run during
-			 * a reset.
-			 */
-			rtnl_unlock();
 			rc = set_link_state(adapter, IBMVNIC_LOGICAL_LNK_DN);
-			rtnl_lock();
 			if (rc)
 				goto out;
 
-			if (adapter->state == VNIC_OPEN) {
-				/* When we dropped rtnl, ibmvnic_open() got
-				 * it and noticed that we are resetting and
-				 * set the adapter state to OPEN. Update our
-				 * new "target" state, and resume the reset
-				 * from VNIC_CLOSING state.
-				 */
-				netdev_dbg(netdev,
-					   "Open changed state from %s, updating.\n",
-					   adapter_state_to_string(reset_state));
-				reset_state = VNIC_OPEN;
-				adapter->state = VNIC_CLOSING;
-			}
-
-			if (adapter->state != VNIC_CLOSING) {
-				/* If someone else changed the adapter state
-				 * when we dropped the rtnl, fail the reset
-				 */
-				rc = -EAGAIN;
-				goto out;
-			}
 			adapter->state = VNIC_CLOSED;
 		}
 	}
@@ -3002,9 +2968,9 @@ out:
 	/* restore the adapter state if reset failed */
 	if (rc)
 		adapter->state = reset_state;
-	/* requestor of VNIC_RESET_CHANGE_PARAM should still hold the rtnl lock */
+	/* requestor of VNIC_RESET_CHANGE_PARAM releases netdev lock */
 	if (!(adapter->reset_reason == VNIC_RESET_CHANGE_PARAM))
-		rtnl_unlock();
+		netdev_unlock(netdev);
 
 	netdev_dbg(adapter->netdev, "[S:%s FOP:%d] Reset done, rc %d\n",
 		   adapter_state_to_string(adapter->state),
@@ -3021,7 +2987,7 @@ static int do_hard_reset(struct ibmvnic_adapter *adapter,
 	netdev_dbg(adapter->netdev, "Hard resetting driver (%s)\n",
 		   reset_reason_to_string(rwi->reset_reason));
 
-	/* read the state and check (again) after getting rtnl */
+	/* ensure state is up to date, could have slept grabbing mutex */
 	reset_state = adapter->state;
 
 	if (reset_state == VNIC_REMOVING || reset_state == VNIC_REMOVED) {
@@ -3118,7 +3084,6 @@ static struct ibmvnic_rwi *get_next_rwi(struct ibmvnic_adapter *adapter)
  * If the ibmvnic device does not have a partner device to communicate with at boot
  * and that partner device comes online at a later time, this function is called
  * to complete the initialization process of ibmvnic device.
- * Caller is expected to hold rtnl_lock().
  *
  * Returns non-zero if sub-CRQs are not initialized properly leaving the device
  * in the down state.
@@ -3132,6 +3097,7 @@ static int do_passive_init(struct ibmvnic_adapter *adapter)
 	struct device *dev = &adapter->vdev->dev;
 	int rc;
 
+	netdev_lock(netdev);
 	netdev_dbg(netdev, "Partner device found, probing.\n");
 
 	adapter->state = VNIC_PROBING;
@@ -3171,6 +3137,7 @@ static int do_passive_init(struct ibmvnic_adapter *adapter)
 
 	adapter->state = VNIC_PROBED;
 	netdev_dbg(netdev, "Probed successfully. Waiting for signal from partner device.\n");
+	netdev_unlock(netdev);
 
 	return 0;
 
@@ -3178,6 +3145,8 @@ init_failed:
 	release_sub_crqs(adapter, 1);
 out:
 	adapter->state = VNIC_DOWN;
+	netdev_unlock(netdev);
+
 	return rc;
 }
 
@@ -3279,9 +3248,7 @@ static void __ibmvnic_reset(struct work_struct *work)
 		spin_unlock_irqrestore(&adapter->state_lock, flags);
 
 		if (rwi->reset_reason == VNIC_RESET_PASSIVE_INIT) {
-			rtnl_lock();
 			rc = do_passive_init(adapter);
-			rtnl_unlock();
 			if (!rc)
 				netif_carrier_on(adapter->netdev);
 		} else if (adapter->force_reset_recovery) {
@@ -3297,10 +3264,10 @@ static void __ibmvnic_reset(struct work_struct *work)
 				adapter->force_reset_recovery = false;
 				rc = do_hard_reset(adapter, rwi, reset_state);
 			} else {
-				rtnl_lock();
+				netdev_lock(adapter->netdev);
 				adapter->force_reset_recovery = false;
 				rc = do_hard_reset(adapter, rwi, reset_state);
-				rtnl_unlock();
+				netdev_unlock(adapter->netdev);
 			}
 			if (rc)
 				num_fails++;
@@ -3597,6 +3564,8 @@ static int wait_for_reset(struct ibmvnic_adapter *adapter)
 	adapter->fallback.tx_queues = adapter->req_tx_queues;
 	adapter->fallback.rx_entries = adapter->req_rx_add_entries_per_subcrq;
 	adapter->fallback.tx_entries = adapter->req_tx_entries_per_subcrq;
+
+	netdev_assert_locked(adapter->netdev);
 
 	reinit_completion(&adapter->reset_done);
 	adapter->wait_for_reset = true;
@@ -6413,6 +6382,10 @@ static int ibmvnic_probe(struct vio_dev *dev, const struct vio_device_id *id)
 	netdev->irq = dev->irq;
 	netdev->netdev_ops = &ibmvnic_netdev_ops;
 	netdev->ethtool_ops = &ibmvnic_ethtool_ops;
+	/* rely on dev lock for synchronous configurations, we also use
+	 * this internally for adapter resets
+	 */
+	netdev->request_ops_lock = true;
 	SET_NETDEV_DEV(netdev, &dev->dev);
 
 	INIT_WORK(&adapter->ibmvnic_reset, __ibmvnic_reset);
@@ -6579,8 +6552,7 @@ static void ibmvnic_remove(struct vio_dev *dev)
 	flush_work(&adapter->ibmvnic_reset);
 	flush_delayed_work(&adapter->ibmvnic_delayed_reset);
 
-	rtnl_lock();
-	unregister_netdevice(netdev);
+	unregister_netdev(netdev);
 
 	release_resources(adapter);
 	release_rx_pools(adapter);
@@ -6593,7 +6565,6 @@ static void ibmvnic_remove(struct vio_dev *dev)
 
 	adapter->state = VNIC_REMOVED;
 
-	rtnl_unlock();
 	mutex_destroy(&adapter->fw_lock);
 	device_remove_file(&dev->dev, &dev_attr_failover);
 	free_netdev(netdev);
