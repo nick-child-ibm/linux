@@ -3214,7 +3214,7 @@ static void __ibmvnic_reset(struct work_struct *work)
 	 * or ibmvnic_open() will complete the open.
 	 */
 	need_reset = false;
-	spin_lock(&adapter->rwi_lock);
+	spin_lock_irqsave(&adapter->rwi_lock, flags);
 	if (!list_empty(&adapter->rwi_list)) {
 		if (test_and_set_bit_lock(0, &adapter->resetting)) {
 			queue_delayed_work(system_long_wq,
@@ -3224,7 +3224,7 @@ static void __ibmvnic_reset(struct work_struct *work)
 			need_reset = true;
 		}
 	}
-	spin_unlock(&adapter->rwi_lock);
+	spin_unlock_irqrestore(&adapter->rwi_lock, flags);
 
 	if (!need_reset)
 		return;
@@ -3356,7 +3356,7 @@ static void flush_reset_queue(struct ibmvnic_adapter *adapter)
 }
 
 static int ibmvnic_reset(struct ibmvnic_adapter *adapter,
-			 enum ibmvnic_reset_reason reason)
+			 enum ibmvnic_reset_reason reason, bool now)
 {
 	struct net_device *netdev = adapter->netdev;
 	struct ibmvnic_rwi *rwi, *tmp;
@@ -3402,13 +3402,16 @@ static int ibmvnic_reset(struct ibmvnic_adapter *adapter,
 	list_add_tail(&rwi->list, &adapter->rwi_list);
 	netdev_dbg(adapter->netdev, "Scheduling reset (reason %s)\n",
 		   reset_reason_to_string(reason));
-	queue_work(system_long_wq, &adapter->ibmvnic_reset);
+	spin_unlock_irqrestore(&adapter->rwi_lock, flags);
+	if (now) {
+		 __ibmvnic_reset(&adapter->ibmvnic_reset);
+	}
+	else {
+		queue_work(system_long_wq, &adapter->ibmvnic_reset);
+	}
 
 	ret = 0;
 err:
-	/* ibmvnic_close() below can block, so drop the lock first */
-	spin_unlock_irqrestore(&adapter->rwi_lock, flags);
-
 	if (ret == ENOMEM)
 		ibmvnic_close(netdev);
 
@@ -3431,7 +3434,7 @@ static void ibmvnic_tx_timeout(struct net_device *dev, unsigned int txqueue)
 		netdev_dbg(dev, "Not yet time to tx timeout.\n");
 		return;
 	}
-	ibmvnic_reset(adapter, VNIC_RESET_TIMEOUT);
+	ibmvnic_reset(adapter, VNIC_RESET_TIMEOUT, false);
 }
 
 static void remove_buff_from_pool(struct ibmvnic_adapter *adapter,
@@ -3569,15 +3572,9 @@ static int wait_for_reset(struct ibmvnic_adapter *adapter)
 
 	reinit_completion(&adapter->reset_done);
 	adapter->wait_for_reset = true;
-	rc = ibmvnic_reset(adapter, VNIC_RESET_CHANGE_PARAM);
-
+	rc = ibmvnic_reset(adapter, VNIC_RESET_CHANGE_PARAM, true);
 	if (rc) {
 		ret = rc;
-		goto out;
-	}
-	rc = ibmvnic_wait_for_completion(adapter, &adapter->reset_done, 60000);
-	if (rc) {
-		ret = -ENODEV;
 		goto out;
 	}
 
@@ -3592,17 +3589,13 @@ static int wait_for_reset(struct ibmvnic_adapter *adapter)
 
 		reinit_completion(&adapter->reset_done);
 		adapter->wait_for_reset = true;
-		rc = ibmvnic_reset(adapter, VNIC_RESET_CHANGE_PARAM);
+		rc = ibmvnic_reset(adapter, VNIC_RESET_CHANGE_PARAM, true);
 		if (rc) {
 			ret = rc;
 			goto out;
 		}
-		rc = ibmvnic_wait_for_completion(adapter, &adapter->reset_done,
-						 60000);
-		if (rc) {
+		if (adapter->reset_done_rc)
 			ret = -ENODEV;
-			goto out;
-		}
 	}
 out:
 	adapter->wait_for_reset = false;
@@ -5385,9 +5378,9 @@ static void handle_error_indication(union ibmvnic_crq *crq,
 			     ibmvnic_fw_err_cause(cause));
 
 	if (crq->error_indication.flags & IBMVNIC_FATAL_ERROR)
-		ibmvnic_reset(adapter, VNIC_RESET_FATAL);
+		ibmvnic_reset(adapter, VNIC_RESET_FATAL, false);
 	else
-		ibmvnic_reset(adapter, VNIC_RESET_NON_FATAL);
+		ibmvnic_reset(adapter, VNIC_RESET_NON_FATAL, false);
 }
 
 static int handle_change_mac_rsp(union ibmvnic_crq *crq,
@@ -5544,7 +5537,7 @@ static int handle_login_rsp(union ibmvnic_crq *login_rsp_crq,
 	     adapter->req_rx_add_queues !=
 	     be32_to_cpu(login_rsp->num_rxadd_subcrqs))) {
 		dev_err(dev, "FATAL: Inconsistent login and login rsp\n");
-		ibmvnic_reset(adapter, VNIC_RESET_FATAL);
+		ibmvnic_reset(adapter, VNIC_RESET_FATAL, false);
 		return -EIO;
 	}
 
@@ -5560,7 +5553,7 @@ static int handle_login_rsp(union ibmvnic_crq *login_rsp_crq,
 		 * parsing the newer response buffer which may be incomplete
 		 */
 		dev_err(dev, "FATAL: Login rsp offsets/lengths invalid\n");
-		ibmvnic_reset(adapter, VNIC_RESET_FATAL);
+		ibmvnic_reset(adapter, VNIC_RESET_FATAL, false);
 		return -EIO;
 	}
 
@@ -5908,9 +5901,9 @@ static void ibmvnic_handle_crq(union ibmvnic_crq *crq,
 			adapter->login_pending = false;
 
 			if (adapter->state == VNIC_DOWN)
-				rc = ibmvnic_reset(adapter, VNIC_RESET_PASSIVE_INIT);
+				rc = ibmvnic_reset(adapter, VNIC_RESET_PASSIVE_INIT, false);
 			else
-				rc = ibmvnic_reset(adapter, VNIC_RESET_FAILOVER);
+				rc = ibmvnic_reset(adapter, VNIC_RESET_FAILOVER, false);
 
 			if (rc && rc != -EBUSY) {
 				/* We were unable to schedule the failover
@@ -5967,7 +5960,7 @@ static void ibmvnic_handle_crq(union ibmvnic_crq *crq,
 			adapter->force_reset_recovery = true;
 		if (gen_crq->cmd == IBMVNIC_PARTITION_MIGRATED) {
 			dev_info(dev, "Migrated, re-enabling adapter\n");
-			ibmvnic_reset(adapter, VNIC_RESET_MOBILITY);
+			ibmvnic_reset(adapter, VNIC_RESET_MOBILITY, false);
 		} else if (gen_crq->cmd == IBMVNIC_DEVICE_FAILOVER) {
 			dev_info(dev, "Backing device failover detected\n");
 			adapter->failover_pending = true;
@@ -5975,7 +5968,7 @@ static void ibmvnic_handle_crq(union ibmvnic_crq *crq,
 			/* The adapter lost the connection */
 			dev_err(dev, "Virtual Adapter failed (rc=%d)\n",
 				gen_crq->cmd);
-			ibmvnic_reset(adapter, VNIC_RESET_FATAL);
+			ibmvnic_reset(adapter, VNIC_RESET_FATAL, false);
 		}
 		return;
 	case IBMVNIC_CRQ_CMD_RSP:
@@ -6607,7 +6600,7 @@ static ssize_t failover_store(struct device *dev, struct device_attribute *attr,
 
 last_resort:
 	netdev_dbg(netdev, "Trying to send CRQ_CMD, the last resort\n");
-	ibmvnic_reset(adapter, VNIC_RESET_FAILOVER);
+	ibmvnic_reset(adapter, VNIC_RESET_FAILOVER, false);
 
 	return count;
 }
