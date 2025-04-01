@@ -42,7 +42,8 @@ static irqreturn_t ibmveth_interrupt(int irq, void *dev_instance);
 static void ibmveth_rxq_harvest_buffer(struct ibmveth_adapter *adapter,
 				       bool reuse);
 static unsigned long ibmveth_get_desired_dma(struct vio_dev *vdev);
-
+static void ibmveth_remove_buffer_from_pool(struct ibmveth_adapter *adapter,
+					    u64 correlator, bool reuse);
 static struct kobj_type ktype_veth_pool;
 
 
@@ -207,103 +208,126 @@ static inline void ibmveth_flush_buffer(void *addr, unsigned long length)
 		asm("dcbf %0,%1,1" :: "b" (addr), "r" (offset));
 }
 
+/**
+ * ibmveth_fill_rx_descriptor - fills a descriptor with a new or reused buffer
+ * @adapter: reference to adapter
+ * @pool: pool to get new buffer for
+ * @desc: pointer to descriptor to fill
+ * @correlator: pointer to value to hold pool | index used in @desc
+ *
+ * Called from rx buff replenish routine, uses next free_map index to fill
+ * descriptor data. If skb and dma address already exist for this index then
+ * the memory is reused. Otherwise it is allocated and mapped.
+ *
+ * Context: Process context.
+ *          Takes and releases rtnl_mutex to ensure correct ordering of close
+ *	    and open calls.
+ * Return:
+ * * %0    - Success
+ * * %-ENOMEM  - Failed to alloc or map skb, free_map unchanged, desc is 0
+ */
+static int ibmveth_fill_rx_descriptor(struct ibmveth_adapter *adapter,
+				      struct ibmveth_buff_pool *pool,
+				      union ibmveth_buf_desc *desc,
+				      u64 *correlator)
+{
+	unsigned int index, free_index;
+	struct sk_buff *skb = NULL;
+	dma_addr_t dma_addr;
+
+	free_index = pool->consumer_index;
+	index = pool->free_map[free_index];
+
+	BUG_ON(index == IBM_VETH_INVALID_MAP);
+
+	/* are we allocating a new buffer or recycling an old one */
+	if (pool->skbuff[index])
+		goto reuse;
+
+	skb = netdev_alloc_skb(adapter->netdev, pool->buff_size);
+
+	if (!skb) {
+		netdev_dbg(adapter->netdev,
+			   "replenish: unable to allocate skb\n");
+		adapter->replenish_no_mem++;
+		desc->desc = 0;
+		return -ENOMEM;
+	}
+
+	dma_addr = dma_map_single(&adapter->vdev->dev, skb->data,
+			pool->buff_size, DMA_FROM_DEVICE);
+
+	if (dma_mapping_error(&adapter->vdev->dev, dma_addr)) {
+		netdev_warn(adapter->netdev, "Failed to dma map skbuff\n");
+		dev_kfree_skb_any(skb);
+		desc->desc = 0;
+		return -ENOMEM;
+	}
+
+	pool->dma_addr[index] = dma_addr;
+	pool->skbuff[index] = skb;
+
+	if (rx_flush) {
+		unsigned int len = min(pool->buff_size,
+				       adapter->netdev->mtu +
+				       IBMVETH_BUFF_OH);
+		ibmveth_flush_buffer(skb->data, len);
+	}
+reuse:
+	dma_addr = pool->dma_addr[index];
+	desc->fields.flags_len = IBMVETH_BUF_VALID | pool->buff_size;
+	desc->fields.address = dma_addr;
+
+	*correlator = ((u64)pool->index << 32) | index;
+	*(u64 *)pool->skbuff[index]->data = *correlator;
+
+	pool->free_map[free_index] = IBM_VETH_INVALID_MAP;
+	pool->consumer_index++;
+	if (pool->consumer_index >= pool->size)
+		pool->consumer_index = 0;
+
+	atomic_inc(&pool->available);
+
+	return 0;
+}
+
 /* replenish the buffers for a pool.  note that we don't need to
  * skb_reserve these since they are used for incoming...
  */
 static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 					  struct ibmveth_buff_pool *pool)
 {
-	u32 i;
 	u32 count = pool->size - atomic_read(&pool->available);
-	u32 buffers_added = 0;
-	struct sk_buff *skb;
-	unsigned int free_index, index;
-	u64 correlator;
 	unsigned long lpar_rc;
-	dma_addr_t dma_addr;
+	u64 correlator;
+	int rc;
+	u32 i;
 
 	mb();
 
 	for (i = 0; i < count; ++i) {
 		union ibmveth_buf_desc desc;
 
-		free_index = pool->consumer_index;
-		index = pool->free_map[free_index];
-		skb = NULL;
-
-		BUG_ON(index == IBM_VETH_INVALID_MAP);
-
-		/* are we allocating a new buffer or recycling an old one */
-		if (pool->skbuff[index])
-			goto reuse;
-
-		skb = netdev_alloc_skb(adapter->netdev, pool->buff_size);
-
-		if (!skb) {
-			netdev_dbg(adapter->netdev,
-				   "replenish: unable to allocate skb\n");
-			adapter->replenish_no_mem++;
+		rc = ibmveth_fill_rx_descriptor(adapter, pool, &desc,
+						&correlator);
+		if (rc)
 			break;
-		}
-
-		dma_addr = dma_map_single(&adapter->vdev->dev, skb->data,
-				pool->buff_size, DMA_FROM_DEVICE);
-
-		if (dma_mapping_error(&adapter->vdev->dev, dma_addr))
-			goto failure;
-
-		pool->dma_addr[index] = dma_addr;
-		pool->skbuff[index] = skb;
-
-		if (rx_flush) {
-			unsigned int len = min(pool->buff_size,
-					       adapter->netdev->mtu +
-					       IBMVETH_BUFF_OH);
-			ibmveth_flush_buffer(skb->data, len);
-		}
-reuse:
-		dma_addr = pool->dma_addr[index];
-		desc.fields.flags_len = IBMVETH_BUF_VALID | pool->buff_size;
-		desc.fields.address = dma_addr;
-
-		correlator = ((u64)pool->index << 32) | index;
-		*(u64 *)pool->skbuff[index]->data = correlator;
 
 		lpar_rc = h_add_logical_lan_buffer(adapter->vdev->unit_address,
 						   desc.desc);
-
 		if (lpar_rc != H_SUCCESS) {
 			netdev_warn(adapter->netdev,
-				    "%sadd_logical_lan failed %lu\n",
-				    skb ? "" : "When recycling: ", lpar_rc);
-			goto failure;
+				    "add_logical_lan failed %lu\n", lpar_rc);
+			ibmveth_remove_buffer_from_pool(adapter, correlator,
+							false);
+			adapter->replenish_add_buff_failure++;
+			break;
 		}
 
-		pool->free_map[free_index] = IBM_VETH_INVALID_MAP;
-		pool->consumer_index++;
-		if (pool->consumer_index >= pool->size)
-			pool->consumer_index = 0;
-
-		buffers_added++;
 		adapter->replenish_add_buff_success++;
 	}
 
 	mb();
-	atomic_add(buffers_added, &(pool->available));
-	return;
-
-failure:
-
-	if (dma_addr && !dma_mapping_error(&adapter->vdev->dev, dma_addr))
-		dma_unmap_single(&adapter->vdev->dev,
-		                 pool->dma_addr[index], pool->buff_size,
-		                 DMA_FROM_DEVICE);
-	dev_kfree_skb_any(pool->skbuff[index]);
-	pool->skbuff[index] = NULL;
-	adapter->replenish_add_buff_failure++;
-
-	mb();
-	atomic_add(buffers_added, &(pool->available));
 }
 
 /*
