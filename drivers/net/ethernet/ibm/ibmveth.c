@@ -1624,6 +1624,8 @@ static const struct net_device_ops ibmveth_netdev_ops = {
 #endif
 };
 
+static struct device_attribute dev_attr_rx_per_hcall;
+
 static int ibmveth_probe(struct vio_dev *dev, const struct vio_device_id *id)
 {
 	int rc, i, mac_len;
@@ -1713,6 +1715,15 @@ static int ibmveth_probe(struct vio_dev *dev, const struct vio_device_id *id)
 	if (firmware_has_feature(FW_FEATURE_CMO))
 		memcpy(pool_count, pool_count_cmo, sizeof(pool_count));
 
+	adapter->rx_per_hcall = IBMVETH_MAX_RX_PER_HCALL;
+	rc = device_create_file(&dev->dev, &dev_attr_rx_per_hcall);
+	if (rc) {
+		netdev_dbg(netdev, "failed creating rx_per_hcall sysfs rc=%d\n",
+			   rc);
+		free_netdev(netdev);
+		return rc;
+	}
+
 	for (i = 0; i < IBMVETH_NUM_BUFF_POOLS; i++) {
 		struct kobject *kobj = &adapter->rx_buff_pool[i].kobj;
 		int error;
@@ -1761,6 +1772,8 @@ static void ibmveth_remove(struct vio_dev *dev)
 	struct net_device *netdev = dev_get_drvdata(&dev->dev);
 	struct ibmveth_adapter *adapter = netdev_priv(netdev);
 	int i;
+
+	device_remove_file(&dev->dev, &dev_attr_rx_per_hcall);
 
 	for (i = 0; i < IBMVETH_NUM_BUFF_POOLS; i++)
 		kobject_put(&adapter->rx_buff_pool[i].kobj);
@@ -1915,7 +1928,49 @@ err:
 	return rc;
 }
 
+/**
+ * rx_per_hcall_show - sysfs handler to show current number of buffers sent per
+ * H_ADD_LOGICAL_LAN_BUFFERS hcall
+ */
+static ssize_t rx_per_hcall_show(struct device *dev,
+				 struct device_attribute *attr, char *buf)
+{
+	struct net_device *netdev = dev_get_drvdata(dev);
+	struct ibmveth_adapter *adapter = netdev_priv(netdev);
 
+	return sprintf(buf, "%d\n", adapter->rx_per_hcall);
+}
+
+/**
+ * rx_per_hcall_store - sysfs handler to store new value for number of buffers
+ * sent per H_ADD_LOGICAL_LAN_BUFFERS hcall. Max is IBMVETH_MAX_RX_PER_HCALL
+ */
+static ssize_t rx_per_hcall_store(struct device *dev,
+				  struct device_attribute *attr,
+				  const char *buf, size_t count)
+{
+	struct net_device *netdev = dev_get_drvdata(dev);
+	struct ibmveth_adapter *adapter = netdev_priv(netdev);
+	unsigned int new;
+
+	if (kstrtouint(buf, 0, &new))
+		return -EINVAL;
+
+	if (new > IBMVETH_MAX_RX_PER_HCALL || new  == 0) {
+		netdev_warn(netdev, "Invalid value %u, expected 0 < rx_per_hcall < %u\n",
+			    new, IBMVETH_MAX_RX_PER_HCALL);
+		return -EINVAL;
+	}
+
+	/* assignment does not have to be thread safe */
+	adapter->rx_per_hcall = new;
+	return count;
+}
+
+/* device-wide sysfs */
+static DEVICE_ATTR_RW(rx_per_hcall);
+
+/* per pool sysfs */
 #define ATTR(_name, _mode)				\
 	struct attribute veth_##_name##_attr = {	\
 	.name = __stringify(_name), .mode = _mode,	\

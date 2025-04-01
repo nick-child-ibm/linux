@@ -101,6 +101,7 @@ static inline long h_illan_attributes(unsigned long unit_address,
 #define IBMVETH_MAX_TX_BUF_SIZE (1024 * 64)
 #define IBMVETH_MAX_QUEUES 16U
 #define IBMVETH_DEFAULT_QUEUES 8U
+#define IBMVETH_MAX_RX_PER_HCALL 8U
 
 static int pool_size[] = { 512, 1024 * 2, 1024 * 16, 1024 * 32, 1024 * 64 };
 static int pool_count[] = { 256, 512, 256, 256, 256 };
@@ -138,6 +139,7 @@ struct ibmveth_adapter {
     struct net_device *netdev;
     struct napi_struct napi;
     unsigned int mcastFilterSize;
+    unsigned int rx_per_hcall;
     void * buffer_list_addr;
     void * filter_list_addr;
     void *tx_ltb_ptr[IBMVETH_MAX_QUEUES];
