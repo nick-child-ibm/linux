@@ -291,40 +291,94 @@ reuse:
 	return 0;
 }
 
+static long ibmveth_replenish_one_rx_buff(struct ibmveth_adapter *adapter,
+					  union ibmveth_buf_desc desc,
+					   u64 cor)
+{
+	long rc = h_add_logical_lan_buffer(adapter->vdev->unit_address,
+					   desc.desc);
+	if (rc != H_SUCCESS) {
+		netdev_warn(adapter->netdev,
+			    "add_logical_lan failed %lu\n", rc);
+		ibmveth_remove_buffer_from_pool(adapter, cor, false);
+		adapter->replenish_add_buff_failure++;
+	} else
+		adapter->replenish_add_buff_success++;
+
+	return rc;
+}
+static long ibmveth_replenish_mult_rx_buffs(struct ibmveth_adapter *adapter,
+					    union ibmveth_buf_desc *descs,
+					    u64 *cors)
+{
+	long rc = h_add_logical_lan_buffers(adapter->vdev->unit_address,
+					    descs[0].desc, descs[1].desc,
+					    descs[2].desc, descs[3].desc,
+					    descs[4].desc, descs[5].desc,
+					    descs[6].desc, descs[7].desc);
+	if (rc == H_FUNCTION) {
+		netdev_dbg(adapter->netdev, "h_add_logical_lan_buffers not supported by FW, falling back\n");
+		adapter->mult_rx_support = false;
+		for (int i = 0; i < IBMVETH_MAX_RX_PER_HCALL; i++) {
+			if (!(descs[i].fields.flags_len & IBMVETH_BUF_VALID))
+				break;
+			rc = ibmveth_replenish_one_rx_buff(adapter, descs[i],
+						           cors[i]);
+		}
+	} else if (rc != H_SUCCESS) {
+		netdev_warn(adapter->netdev,
+			    "add_logical_lan_buffers failed %lu\n", rc);
+		for (int i = 0; i < IBMVETH_MAX_RX_PER_HCALL; i++) {
+			if (!(descs[i].fields.flags_len & IBMVETH_BUF_VALID))
+				break;
+			ibmveth_remove_buffer_from_pool(adapter, cors[i],
+							false);
+		}
+		adapter->replenish_add_buff_failure++;
+	} else
+		adapter->replenish_add_buff_success++;
+
+	return rc;
+}
 /* replenish the buffers for a pool.  note that we don't need to
  * skb_reserve these since they are used for incoming...
  */
 static void ibmveth_replenish_buffer_pool(struct ibmveth_adapter *adapter,
 					  struct ibmveth_buff_pool *pool)
 {
+	union ibmveth_buf_desc descs[IBMVETH_MAX_RX_PER_HCALL] = {0};
 	u32 count = pool->size - atomic_read(&pool->available);
+	u64 cors[IBMVETH_MAX_RX_PER_HCALL];
 	unsigned long lpar_rc;
-	u64 correlator;
-	int rc;
-	u32 i;
+	u32 i, desc_i;
 
 	mb();
+	desc_i = 0;
 
 	for (i = 0; i < count; ++i) {
-		union ibmveth_buf_desc desc;
-
-		rc = ibmveth_fill_rx_descriptor(adapter, pool, &desc,
-						&correlator);
-		if (rc)
+		if (ibmveth_fill_rx_descriptor(adapter, pool, &descs[desc_i],
+					       &cors[desc_i]))
 			break;
 
-		lpar_rc = h_add_logical_lan_buffer(adapter->vdev->unit_address,
-						   desc.desc);
-		if (lpar_rc != H_SUCCESS) {
-			netdev_warn(adapter->netdev,
-				    "add_logical_lan failed %lu\n", lpar_rc);
-			ibmveth_remove_buffer_from_pool(adapter, correlator,
-							false);
-			adapter->replenish_add_buff_failure++;
-			break;
+		if (!adapter->mult_rx_support) {
+			lpar_rc = ibmveth_replenish_one_rx_buff(adapter,
+								descs[0],
+								cors[0]);
+			if (lpar_rc)
+				break;
+			desc_i = 0;
+			descs[0].desc = 0;
+		/* else we can use mult rx hcall */
+		} else if (desc_i >= adapter->rx_per_hcall - 1  || i == count - 1) {
+			lpar_rc = ibmveth_replenish_mult_rx_buffs(adapter,
+								  descs, cors);
+			if (lpar_rc)
+				break;
+			desc_i = 0;
+			memset(&descs, 0, sizeof(descs));
+		} else {
+			desc_i++;
 		}
-
-		adapter->replenish_add_buff_success++;
 	}
 
 	mb();
@@ -1739,6 +1793,7 @@ static int ibmveth_probe(struct vio_dev *dev, const struct vio_device_id *id)
 	if (firmware_has_feature(FW_FEATURE_CMO))
 		memcpy(pool_count, pool_count_cmo, sizeof(pool_count));
 
+	adapter->mult_rx_support = true;
 	adapter->rx_per_hcall = IBMVETH_MAX_RX_PER_HCALL;
 	rc = device_create_file(&dev->dev, &dev_attr_rx_per_hcall);
 	if (rc) {
